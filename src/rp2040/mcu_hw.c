@@ -296,10 +296,12 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
   uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
   uint16_t vid, pid;
-  tuh_vid_pid_get(dev_addr, &vid, &pid, &ver);
+  tuh_vid_pid_get(dev_addr, &vid, &pid);
+  tuh_descriptor_get_device_sync(dev_addr, &desc.device, 18);
+  uint16_t ver = desc.device.bcdDevice;
 	
 	// check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268:0100)
-   if (vid == 0x054c && pid == 0x0268 && ver == 0x0100 {
+   if (vid == 0x054c && pid == 0x0268 && ver == 0x0100) {
     usb_debugf("Send Wake-up to Competition Pro...");
     
     // 1. Set Report (Manche Klone brauchen das als Initialisierung)
