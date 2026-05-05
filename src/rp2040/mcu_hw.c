@@ -297,23 +297,17 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
   uint16_t vid, pid;
   tuh_vid_pid_get(dev_addr, &vid, &pid);
-  tuh_descriptor_get_device_sync(dev_addr, &desc.device, 18);
-  uint16_t ver = desc.device.bcdDevice;
 	
 	// check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268:0100)
-   if (vid == 0x054c && pid == 0x0268 && ver == 0x0100) {
-    usb_debugf("Send Wake-up to Competition Pro...");
+	if (vid == 0x054c && pid == 0x0268) {
+   usb_debugf("Wake-up: Competition Pro V3 erkannt [%04x:%04x]", vid, pid);
     
-    // 1. Set Report (Manche Klone brauchen das als Initialisierung)
-    uint8_t wakeup_cmd[] = { 0x01, 0x03, 0x00 }; 
-    tuh_hid_set_report(dev_addr, instance, 0, HID_REPORT_TYPE_OUTPUT, wakeup_cmd, sizeof(wakeup_cmd));
+    // Kickstart über Control Pipe
+    tuh_hid_get_report(dev_addr, instance, 0, HID_REPORT_TYPE_INPUT, desc.buf, 64);
     
-    // 2. Kurze Pause, damit die Firmware des Joysticks umschalten kann
-    vTaskDelay(pdMS_TO_TICKS(50));
-    
-    // 3. Den Report-Empfang erneut triggern
-    tuh_hid_receive_report(dev_addr, instance);
-	}	
+    // Kurze Pause für die Stick-Firmware
+    vTaskDelay(pdMS_TO_TICKS(100)); // 100ms ist oft sicherer als 50ms
+  }	
   usb_debugf("[%04x:%04x][%u] HID Interface%u, Protocol = %s",
 	     vid, pid, dev_addr, instance, protocol_str[itf_protocol]);
 
