@@ -298,16 +298,13 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
   uint16_t vid, pid;
   tuh_vid_pid_get(dev_addr, &vid, &pid);
 	
-	// check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268:0100)
-	if (vid == 0x054c && pid == 0x0268) {
-   usb_debugf("Wake-up: Competition Pro V3 erkannt [%04x:%04x]", vid, pid);
-    
-    // Kickstart über Control Pipe
-    tuh_hid_get_report(dev_addr, instance, 0, HID_REPORT_TYPE_INPUT, desc.buf, 64);
-    
-    // Kurze Pause für die Stick-Firmware
-    vTaskDelay(pdMS_TO_TICKS(100)); // 100ms ist oft sicherer als 50ms
-  }	
+	// check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268)
+   if (vid == 0x054c && pid == 0x0268) {
+	  	static uint8_t const magic_init[] = { 0x42, 0x0c, 0x00, 0x00 };
+       // We send a Set_Report (Feature) to activate the controller
+       tuh_hid_set_report(dev_addr, instance, 0xf4, HID_REPORT_TYPE_FEATURE, (void*)magic_init, sizeof(magic_init));
+       printf("PS3-Mode Joystick activated!\n");
+	}
   usb_debugf("[%04x:%04x][%u] HID Interface%u, Protocol = %s",
 	     vid, pid, dev_addr, instance, protocol_str[itf_protocol]);
 
