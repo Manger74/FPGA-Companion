@@ -33,6 +33,7 @@
 #define CONFIG_XML_ELEMENT_BUTTON        14
 #define CONFIG_XML_ELEMENT_IMAGE         15
 #define CONFIG_XML_ELEMENT_TOGGLE        16
+#define CONFIG_XML_ELEMENT_CFGSEL        17  // <config> inside a menu
 
 static int config_element;
 static int config_depth;
@@ -341,7 +342,7 @@ static config_menu_entry_t *config_xml_get_last_menu_entry(config_menu_t *menu, 
 }
 
 const char *config_menuentry_get_type_str(config_menu_entry_t *entry) {
-  const char *names[] = { "unknown", "menu", "fileselector", "list", "button", "image", "toggle" };
+  const char *names[] = { "unknown", "menu", "fileselector", "list", "button", "image", "toggle", "cfgsel" };
 
   if(entry->type == CONFIG_MENU_ENTRY_MENU)         return names[1];
   if(entry->type == CONFIG_MENU_ENTRY_FILESELECTOR) return names[2];
@@ -349,6 +350,7 @@ const char *config_menuentry_get_type_str(config_menu_entry_t *entry) {
   if(entry->type == CONFIG_MENU_ENTRY_BUTTON)       return names[4];
   if(entry->type == CONFIG_MENU_ENTRY_IMAGE)        return names[5];
   if(entry->type == CONFIG_MENU_ENTRY_TOGGLE)       return names[6];
+  if(entry->type == CONFIG_MENU_ENTRY_CFGSEL)       return names[7];
   return names[0];  
 }
 
@@ -377,6 +379,10 @@ static int config_xml_menu_element(char *name) {
   } else if(strcasecmp(name, "toggle") == 0) {
     config_xml_new_toggle(menu);
     config_element = CONFIG_XML_ELEMENT_TOGGLE;
+    return 0;
+  } else if(strcasecmp(name, "config") == 0) {
+    config_xml_new_cfgsel(menu);
+    config_element = CONFIG_XML_ELEMENT_CFGSEL;
     return 0;
   } else
     debugf("WARNING: Unexpected menu element %s in state %d", name, config_element);
@@ -422,6 +428,9 @@ static void config_dump_menu(config_menu_t *mnu) {
       break;
     case CONFIG_MENU_ENTRY_TOGGLE:
       config_dump_toggle(me->toggle);
+      break;
+    case CONFIG_MENU_ENTRY_CFGSEL:
+      config_dump_cfgsel(me->cfgsel);
       break;
     }
     me = me->next;
@@ -494,6 +503,47 @@ static void config_dump_fileselector(config_fsel_t *fs) {
 	 fs->index, fs->label, fs->ext[0], fs->def?fs->def:"<none>");
   for(int i=1;fs->ext[i];i++) debugf("  further ext: \"%s\"", fs->ext[i]);
   if(fs->action) config_dump_action(fs->action);
+}
+
+/* ============================================================================= */
+/* ============================= cfgsel (config file selector) ================= */
+/* ============================================================================= */
+
+static void config_xml_new_cfgsel(config_menu_t *menu) {
+  config_cfgsel_t *cfgsel = pvPortMalloc(sizeof(config_cfgsel_t));
+  cfgsel->index = 0;
+  cfgsel->label = NULL;
+  cfgsel->ext = NULL;
+  cfgsel->def = NULL;
+  cfgsel->action = NULL;
+
+  config_menu_entry_t *me = config_xml_new_menu_entry(menu);
+  me->type = CONFIG_MENU_ENTRY_CFGSEL;
+  me->cfgsel = cfgsel;
+}
+
+static void config_xml_cfgsel_attribute(char *name, char *value) {
+  config_menu_entry_t *me = config_xml_get_last_menu_entry(cfg->menu, config_depth-2);
+  if(me && me->type == CONFIG_MENU_ENTRY_CFGSEL) {
+    if(me->cfgsel && strcasecmp(name, "label") == 0 && !me->cfgsel->label)
+      me->cfgsel->label = StrDup(value);
+    else if(me->cfgsel && strcasecmp(name, "ext") == 0 && !me->cfgsel->ext)
+      me->cfgsel->ext = config_parse_strlist(value, ';');
+    else if(me->cfgsel && strcasecmp(name, "index") == 0)
+      me->cfgsel->index = atoi(value);
+    else if(me->cfgsel && strcasecmp(name, "default") == 0)
+      me->cfgsel->def = StrDup(value);
+    else if(strcasecmp(name, "action") == 0)
+      me->cfgsel->action = config_get_action(value);
+    else
+      debugf("WARNING: Unused config selector attribute '%s'", name);
+  }
+}
+
+static void config_dump_cfgsel(config_cfgsel_t *cs) {
+  debugf("CfgSel, index=%d, label=\"%s\" ext=[%s], default=\"%s\"",
+	 cs->index, cs->label, cs->ext?cs->ext[0]:"<none>", cs->def?cs->def:"<none>");
+  if(cs->action) config_dump_action(cs->action);
 }
   
 /* ============================================================================= */
@@ -827,6 +877,7 @@ void xml_element_end_cb(void) {
   case CONFIG_XML_ELEMENT_BUTTON:
   case CONFIG_XML_ELEMENT_IMAGE:
   case CONFIG_XML_ELEMENT_TOGGLE:
+  case CONFIG_XML_ELEMENT_CFGSEL:
     config_element = CONFIG_XML_ELEMENT_MENU;
     break;
     
@@ -884,6 +935,10 @@ void xml_attribute_cb(char *name, char *value) {
     
   case CONFIG_XML_ELEMENT_TOGGLE:
     config_xml_toggle_attribute(name, value);
+    break;
+
+  case CONFIG_XML_ELEMENT_CFGSEL:
+    config_xml_cfgsel_attribute(name, value);
     break;
   }
 }

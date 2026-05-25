@@ -79,6 +79,9 @@ typedef struct {
   char **ext;
   config_action_t *action;  // action to be run afterwards
 
+  // set when this file selector is used to load a config (.ini) file
+  bool is_config_sel;
+
   // string and icon to be used if nothing is selected
   // by default this is "[X] No Disk"
   char *none_str;
@@ -441,6 +444,8 @@ static char *menuentry_get_label(config_menu_entry_t *entry) {
     return entry->menu->label;
   if(entry->type == CONFIG_MENU_ENTRY_FILESELECTOR)
     return entry->fsel->label;
+  if(entry->type == CONFIG_MENU_ENTRY_CFGSEL)
+    return entry->cfgsel->label;
   if(entry->type == CONFIG_MENU_ENTRY_LIST)
     return entry->list->label;
   if(entry->type == CONFIG_MENU_ENTRY_BUTTON)
@@ -518,6 +523,11 @@ static void menu_draw_entry(config_menu_entry_t *entry, int row, bool selected) 
     // icon depends if floppy is inserted
     u8g2_DrawXBM(&u8g2, hl_w-MENU_ENTRY_BASE, ypos-8, 8, 8,
 		 sdc_get_image_name(entry->fsel->index)?icn_floppy_bits:icn_empty_bits);
+  }
+
+  if(entry->type == CONFIG_MENU_ENTRY_CFGSEL) {
+    // show a small arrow icon to indicate a selectable config file
+    u8g2_DrawXBM(&u8g2, hl_w-8, ypos-8, 8, 8, icn_right_bits);
   }
   
   if(entry->type == CONFIG_MENU_ENTRY_TOGGLE) 
@@ -684,6 +694,15 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
     fsel_state.none_str = entry->image->none_str;
     fsel_state.none_icn = entry->image->none_icn;
     fsel_state.action = entry->image->action;
+    fsel_state.is_config_sel = false;
+  } else if(entry->type == CONFIG_MENU_ENTRY_CFGSEL) {
+    menu_debugf("opening config file selector");
+    fsel_state.ext = entry->cfgsel->ext;
+    fsel_state.index = entry->cfgsel->index;
+    fsel_state.none_str = NULL;
+    fsel_state.none_icn = NULL;
+    fsel_state.action = entry->cfgsel->action;
+    fsel_state.is_config_sel = true;
   } else {
     menu_debugf("opening drive image selector");
     fsel_state.ext = entry->fsel->ext;
@@ -691,6 +710,7 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
     fsel_state.none_str = NULL;
     fsel_state.none_icn = NULL;
     fsel_state.action = entry->fsel->action;
+    fsel_state.is_config_sel = false;
   }
     
   // The file selector usually works on the sd card as that is what
@@ -700,7 +720,10 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
 
   // Initialize current working directory if needed
   if(!sdc_get_cwd(fsel_state.index)) {
-    bool is_usb = strncasecmp(entry->fsel->def, "/usb", 4) == 0;
+    const char *def = (entry->type == CONFIG_MENU_ENTRY_IMAGE)  ? entry->image->def :
+                      (entry->type == CONFIG_MENU_ENTRY_CFGSEL) ? entry->cfgsel->def :
+                                                                   entry->fsel->def;
+    bool is_usb = def && strncasecmp(def, "/usb", 4) == 0;
     
     // check if USB is to be used but isn't present
     if(is_usb && (disk_status(1) != RES_OK)) {
@@ -815,17 +838,41 @@ static void menu_fileselector_select(sdc_dir_entry_t *entry) {
       }
     }
   } else {
-    // request insertion of this image
-    sdc_image_open(drive, entry->name);
-    
-    // return to parent form
-    menu_pop();
+    // check if this is a config file selector
+    if(fsel_state.is_config_sel) {
+      // build path relative to CARD_MOUNTPOINT for inifile_read()
+      // e.g. cwd="/sd"        + "ags.amiga.ini" -> "ags.amiga.ini"
+      //      cwd="/sd/configs" + "ags.amiga.ini" -> "configs/ags.amiga.ini"
+      const char *cwd = sdc_get_cwd(drive);
+      const char *cwd_rel = cwd + strlen(CARD_MOUNTPOINT);  // "" or "/subdir"
+      char ini_path[FF_LFN_BUF + 10];
+      if(cwd_rel[0] == '\0')
+        snprintf(ini_path, sizeof(ini_path), "%s", entry->name);
+      else
+        snprintf(ini_path, sizeof(ini_path), "%s/%s", cwd_rel + 1, entry->name);
 
-    // check if this is a drive image selection and run action if yes. Image selectors
-    // work differently and do an IRQ driven transfer in the background. The action is there executed
-    // ocne the transfer itself is done.
-    if(drive<MAX_DRIVES && fsel_state.action)
-      sys_run_action(fsel_state.action);
+      menu_debugf("loading config from '%s'", ini_path);
+      inifile_read(ini_path);
+
+      // return to parent menu
+      menu_pop();
+
+      // run the action (e.g. reset_hide)
+      if(fsel_state.action)
+        sys_run_action(fsel_state.action);
+    } else {
+      // request insertion of this image
+      sdc_image_open(drive, entry->name);
+    
+      // return to parent form
+      menu_pop();
+
+      // check if this is a drive image selection and run action if yes. Image selectors
+      // work differently and do an IRQ driven transfer in the background. The action is there executed
+      // ocne the transfer itself is done.
+      if(drive<MAX_DRIVES && fsel_state.action)
+        sys_run_action(fsel_state.action);
+    }
   }
 }
 
@@ -906,6 +953,11 @@ static void menu_select(void) {
   switch(entry->type) {
   case CONFIG_MENU_ENTRY_FILESELECTOR:
     // user has choosen a file selector
+    menu_file_selector_open(entry);
+    break;
+
+  case CONFIG_MENU_ENTRY_CFGSEL:
+    // user has choosen a config file selector
     menu_file_selector_open(entry);
     break;
     
