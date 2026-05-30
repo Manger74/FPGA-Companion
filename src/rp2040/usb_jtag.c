@@ -505,16 +505,16 @@ static uint16_t cmd_shift_parse(struct jtag *jtag, uint8_t *buf, uint16_t len) {
 }
 
 // https://github.com/MiSTle-Dev/PICO-MPSSE/blob/main/pico_mpsse/pico_mpsse.c
-void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
-  uint8_t lbuf[bufsize]; // use a local buffer as jtag_send may want to reverse the byte order
-  uint8_t *lbuffer = lbuf;
-  memcpy(lbuffer, buffer, bufsize);
-  
+//
+// TinyUSB < 0.16.0 : tud_vendor_rx_cb(uint8_t itf)                              -- data via tud_vendor_n_read()
+// TinyUSB >= 0.16.0: tud_vendor_rx_cb(uint8_t itf, uint8_t const*, uint16_t)   -- data passed in (uint16_t!)
+//
+static void handle_vendor_rx(uint8_t itf, uint8_t *lbuffer, uint32_t bufsize) {
 #ifdef DEBUG_DATA_TRANSFER
-  usb_debugf("tud_vendor_rx_cb(%d, %p, %d)", itf, lbuffer, bufsize); 
+  usb_debugf("tud_vendor_rx_cb(%d, %p, %d)", itf, lbuffer, bufsize);
   hexdump(lbuffer, bufsize);
 #endif
-  
+
   struct jtag *jtag = &jtag_engine[itf];
 
   // check if this port is in mpsse mode at all
@@ -525,13 +525,13 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
 #ifdef DEBUG_DATA_TRANSFER
       usb_debugf("Continue pending write %d of %d", bytes2shift, jtag->pending_writes);
 #endif
-      
+
       jtag_data((jtag->pending_write_cmd&8)?1:0, (uint8_t*)lbuffer,
 		(jtag->pending_write_cmd & 0x20)?(jtag->reply_buffer + jtag->reply_len + 2):NULL,
 		(uint32_t)bytes2shift*8);
       if(jtag->pending_write_cmd & 0x20) jtag->reply_len += bytes2shift;
-      
-      jtag->pending_writes -= bytes2shift;      
+
+      jtag->pending_writes -= bytes2shift;
       bufsize -= bytes2shift;
       lbuffer += bytes2shift;
 
@@ -542,39 +542,56 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
       }
     }
 
-    // parse incoming command  
+    // parse incoming command
     while(bufsize) {
       // move next byte into command buffer
-      // printf("BUF %d -> %02x to %d\n", bufsize, *buffer, jtag->cmd_buf.len);
       jtag->cmd_buf.data.bytes[jtag->cmd_buf.len++] = *lbuffer++;
       bufsize--;
-      
+
       if(jtag->cmd_buf.len &&
 	 cmd_size(jtag->cmd_buf.data.cmd.code) <= jtag->cmd_buf.len) {
 	if(jtag->cmd_buf.data.cmd.code & 0x80) {
 	  cmd_parse(jtag);
-	} else  {
+	} else {
 	  int skip = cmd_shift_parse(jtag, (uint8_t*)lbuffer, bufsize);
 	  lbuffer += skip;
 	  bufsize -= skip;
 	}
-	
+
 	// flush the command buffer
 	jtag->cmd_buf.len = 0;
       }
-    }  
+    }
 
     // re-enable receiver, now that all data has been processed. But make sure
     // we can actually accept more data
     if(!check_reply_buffer(jtag)) {
-      // this is untested as we've recently been unable to trigger this      
+      // this is untested as we've recently been unable to trigger this
       usb_debugf("FLOW: disable receiver");
-      jtag->rx_disabled = true;      
+      jtag->rx_disabled = true;
     } else
       tud_vendor_n_read_flush(itf);
   } else
     usb_debugf("No in MPSSE mode");
 }
+
+// TinyUSB >= 0.16.0 passes the received data directly in the callback.
+// Older versions only pass the interface number; data must be read manually.
+#if TUSB_VERSION_NUMBER >= 1600
+void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint16_t bufsize) {
+  uint8_t lbuf[bufsize]; // local copy — jtag_send may reverse byte order
+  memcpy(lbuf, buffer, bufsize);
+  handle_vendor_rx(itf, lbuf, (uint32_t)bufsize);
+}
+#else
+void tud_vendor_rx_cb(uint8_t itf) {
+  uint32_t bufsize = tud_vendor_n_available(itf);
+  if(!bufsize) return;
+  uint8_t lbuf[bufsize];
+  tud_vendor_n_read(itf, lbuf, bufsize);
+  handle_vendor_rx(itf, lbuf, bufsize);
+}
+#endif
 
 void tud_vendor_tx_cb(uint8_t itf, __attribute__((unused)) uint32_t bufsize) {
   struct jtag *jtag = &jtag_engine[itf];
