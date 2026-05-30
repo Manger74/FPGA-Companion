@@ -11,5 +11,6 @@
 int inifile_read(char *);
 void inifile_write(char *);
 int inifile_option_get(int id);
+const char *inifile_get_current(void);  // returns last loaded .ini filename
 
 #endif // INIFILE_H

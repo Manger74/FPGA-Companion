@@ -81,6 +81,7 @@ static void config_xml_new_list(config_menu_t *menu);
 static void config_xml_new_button(config_menu_t *menu);
 static void config_xml_new_image(config_menu_t *menu);
 static void config_xml_new_toggle(config_menu_t *menu);
+static void config_xml_new_cfgsel(config_menu_t *menu);
 
 /* ============================================================================= */
 /* ================================ config ===================================== */
@@ -404,6 +405,7 @@ static void config_dump_button(config_button_t *btn);
 static void config_dump_image(config_image_t *img);
 static void config_dump_toggle(config_toggle_t *btn);
 static void config_dump_list(config_list_t *ls);
+static void config_dump_cfgsel(config_cfgsel_t *cs);
 
 static void config_dump_menu(config_menu_t *mnu) {
   debugf("Menu, label=\"%s\"", mnu->label);

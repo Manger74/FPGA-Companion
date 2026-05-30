@@ -269,7 +269,7 @@ static void sys_handle_event(bool ignore_coldboot) {
 
     // the second button controls the OSD, so it can be used in conjunction
     // with 
-#if defined(M0S_DOCK)||defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
+#if defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
     if(!mcu_hw_jtag_is_active())
 #endif
 
@@ -284,7 +284,7 @@ static void sys_handle_event(bool ignore_coldboot) {
     else {
       sys_debugf("FPGA cold boot detected, reseting MCU ...");
 
-#if defined(M0S_DOCK)||defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
+#if defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
       // Check for USB-JTAG activity and don't reset (and thus break
       // the JTAG activity)
       if(mcu_hw_jtag_is_active()) {
@@ -379,7 +379,10 @@ void sys_run_action(config_action_t *action) {
       
     case CONFIG_ACTION_COMMAND_SAVE:
       sys_debugf("SAVE %s", command->filename);
-      inifile_write(command->filename);
+      // Save back to whichever .ini was last loaded, so that e.g. selecting
+      // ags.amiga.ini and then "Save settings" writes to ags.amiga.ini, not
+      // the default amiga.ini that is hardcoded in the XML action.
+      inifile_write(inifile_get_current() ? inifile_get_current() : command->filename);
       break;
       
     case CONFIG_ACTION_COMMAND_HIDE:
