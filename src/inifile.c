@@ -181,7 +181,7 @@ int inifile_read(char *name) {
   return 0;
 }
 
-void inifile_write(char *name) {
+void inifile_write(const char *name) {
   if(!name) {
     ini_debugf("Unable to write core specific setting as no core has been identified");
     return;
