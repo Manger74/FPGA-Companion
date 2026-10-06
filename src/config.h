@@ -117,6 +117,16 @@ typedef struct {
 #define CONFIG_MENU_ENTRY_IMAGE         5
 #define CONFIG_MENU_ENTRY_TOGGLE        6
 #define CONFIG_MENU_ENTRY_RANGE         7
+#define CONFIG_MENU_ENTRY_CFGSEL        8  // config file selector (loads .ini)
+
+// config selector: browse for an .ini file and load it as a new config
+typedef struct {
+  char index;
+  char *label;
+  char *def;
+  char **ext;
+  config_action_t *action;
+} config_cfgsel_t;
 
 typedef struct config_menu_entry_S {
   unsigned char type;
@@ -128,6 +138,7 @@ typedef struct config_menu_entry_S {
     config_image_t *image;
     config_toggle_t *toggle;
     config_range_t *range;
+    config_cfgsel_t *cfgsel;
   };  
   struct config_menu_entry_S *next;
 } config_menu_entry_t;
