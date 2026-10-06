@@ -23,6 +23,20 @@ static const struct option_S { char *name; char *info; int index; } option_ids[]
 };
 
 static int options[2] = { 0x45, 0 };  // default options: hotkey=F12, led=blink
+
+// filename of the most recently loaded .ini (relative to CARD_MOUNTPOINT, no leading '/')
+static char *current_ini = NULL;
+
+const char *inifile_get_current(void) {
+  return current_ini;
+}
+
+static void inifile_set_current(const char *name) {
+  if(current_ini) vPortFree(current_ini);
+  current_ini = pvPortMalloc(strlen(name) + 1);
+  strcpy(current_ini, name);
+}
+
 static void inifile_parse_option(char *id, char *value) {
   for(const struct option_S *oid = option_ids;oid->name;oid++) {
     if(!strcasecmp(oid->name, id)) {
@@ -49,6 +63,8 @@ int inifile_read(char *name) {
   strcat(filename, name);
   
   ini_debugf("Reading settings from '%s'", filename);
+
+  inifile_set_current(name);  // remember which .ini was loaded
 
   sdc_lock();  // get exclusive access to the file system
 
@@ -166,7 +182,7 @@ int inifile_read(char *name) {
   return 0;
 }
 
-void inifile_write(char *name) {
+void inifile_write(const char *name) {
   if(!name) {
     ini_debugf("Unable to write core specific setting as no core has been identified");
     return;
