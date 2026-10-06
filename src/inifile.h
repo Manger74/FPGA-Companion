@@ -13,8 +13,9 @@
 
 // handle the core specific ini file
 int inifile_read(char *);
-void inifile_write(char *);
+void inifile_write(const char *);
 int inifile_option_get(int id);
+const char *inifile_get_current(void);  // returns last loaded .ini filename
 
 // handle the global ini file (config.ini)
 void inifile_config_read(void);
