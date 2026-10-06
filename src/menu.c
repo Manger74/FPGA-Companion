@@ -98,6 +98,9 @@ typedef struct {
   char **ext;
   config_action_t *action;  // action to be run afterwards
 
+ // set when this file selector is used to load a config (.ini) file
+  bool is_config_sel;
+
   // string and icon to be used if nothing is selected
   // by default this is "[X] No Disk"
   char *none_str;
@@ -360,11 +363,30 @@ static void menu_push(void) {
   menu_state = state;
 }
 
+// Visibility check: floppy DF1-DF3 beyond enabled drive count,
+//                or HDD DH0/DH1 when IDE is disabled (variable I == 0)
+#define ENTRY_HIDDEN(e) ( \
+  (e)->type == CONFIG_MENU_ENTRY_FILESELECTOR && ( \
+    (((e)->fsel->index >= 1 && (e)->fsel->index <= 3) && \
+      (e)->fsel->index > menu_variable_get('D')) || \
+    (((e)->fsel->index == 4 || (e)->fsel->index == 5) && \
+      menu_variable_get('I') == 0) \
+  ))
+
 static int menu_len(const config_menu_t *menu) {
   int entries = 0;
   config_menu_entry_t *me = menu->entries;
   while(me) {
-    entries++;
+      bool visible = true;
+    if(me->type == CONFIG_MENU_ENTRY_FILESELECTOR) {
+      // DF1-DF3: only visible when enough floppy drives are enabled
+      if(me->fsel->index >= 1 && me->fsel->index <= 3)
+        visible = (me->fsel->index <= menu_variable_get('D'));
+      // DH0/DH1: only visible when IDE is enabled (I != 0)
+      if(me->fsel->index == 4 || me->fsel->index == 5)
+        visible = (menu_variable_get('I') != 0);
+    }
+    if(visible) entries++;
     me = me->next;
   }
   return entries;
@@ -493,6 +515,8 @@ static char *menuentry_get_label(config_menu_entry_t *entry) {
     return entry->menu->label;
   if(entry->type == CONFIG_MENU_ENTRY_FILESELECTOR)
     return entry->fsel->label;
+  if(entry->type == CONFIG_MENU_ENTRY_CFGSEL)
+    return entry->cfgsel->label;
   if(entry->type == CONFIG_MENU_ENTRY_LIST)
     return entry->list->label;
   if(entry->type == CONFIG_MENU_ENTRY_BUTTON)
@@ -575,7 +599,12 @@ static void menu_draw_entry(config_menu_entry_t *entry, int row, bool selected) 
   else if(entry->type == CONFIG_MENU_ENTRY_TOGGLE) 
     u8g2_DrawXBM(&u8g2, hl_w-MENU_ENTRY_BASE, ypos-8, 8, 8,
 		 menu_variable_get(entry->toggle->id)?icn_on_bits:icn_off_bits);
-  
+
+ if(entry->type == CONFIG_MENU_ENTRY_CFGSEL) {
+    // show a small arrow icon to indicate a selectable config file
+    u8g2_DrawXBM(&u8g2, hl_w-8, ypos-8, 8, 8, icn_right_bits);
+  }
+	
   if(entry->type == CONFIG_MENU_ENTRY_IMAGE) {
     const unsigned char *icon = sdc_get_image_name(entry->image->index+MAX_DRIVES)?icn_floppy_bits:
       entry->image->none_icn?entry->image->none_icn:
@@ -726,12 +755,61 @@ static void menu_draw(const config_menu_t *menu, int selected, int scroll) {
   menu_debugf("drawing '%s'", menu->label);  
     
   // draw the title
-  menu_draw_title(menu->label, !menu_is_root(menu), selected == 0);
+    if(menu_is_root(menu)) {
+    // append config name derived from current ini file, e.g.:
+    //   "amiga.ini"     -> "NanoMig 68020"          (no suffix)
+    //   "ags.amiga.ini" -> "NanoMig 68020 - ags"
+    const char *ini = inifile_get_current();
+    const char *suffix = NULL;
+    if(ini) {
+      // strip trailing ".amiga.ini" if present
+      const char *tag = ".amiga.ini";
+      int tag_len = strlen(tag);
+      // strip leading directory components (e.g. "configs/ags.amiga.ini" -> "ags.amiga.ini")
+      const char *slash = strrchr(ini, '/');
+      const char *basename = slash ? slash + 1 : ini;
+      int ini_len = strlen(basename);
+      if(ini_len > tag_len &&
+         strcasecmp(basename + ini_len - tag_len, tag) == 0) {
+        // there are characters before ".amiga.ini" -> use them as suffix
+        static char sfx[32];
+        int sfx_len = ini_len - tag_len;
+        if(sfx_len >= (int)sizeof(sfx)) sfx_len = sizeof(sfx) - 1;
+        strncpy(sfx, basename, sfx_len);
+        sfx[sfx_len] = '\0';
+        suffix = sfx;
+      }
+    }
+    if(suffix) {
+      static char root_title[64];
+      snprintf(root_title, sizeof(root_title), "%s - %s", menu->label, suffix);
+      menu_draw_title(root_title, false, selected == 0);
+    } else {
+      menu_draw_title(menu->label, false, selected == 0);
+    }
+  } else {
+    menu_draw_title(menu->label, true, selected == 0);
+  }
+
+  #define NEXT_VISIBLE(e) \
+    for((e)=(e)->next; \
+        (e) && ENTRY_HIDDEN(e); \
+        (e)=(e)->next) {}
 
   config_menu_entry_t *entry = menu->entries;
-  for(int i=0;i<scroll;i++) entry=entry->next;  // skip first "scroll" entries
-  for(int i=0;i<4 && entry;i++,entry=entry->next)           // then draw up to four entries
-    menu_draw_entry(entry, i, selected == scroll+i+1);    
+   // skip any invisible entries at the very start of the list
+  while(entry && ENTRY_HIDDEN(entry)) entry = entry->next;
+
+  // skip first "scroll" visible entries
+  for(int i=0;i<scroll;i++) { NEXT_VISIBLE(entry); }
+  // draw up to four visible entries
+  for(int i=0;i<4 && entry;i++) {
+    menu_draw_entry(entry, i, selected == scroll+i+1);
+    NEXT_VISIBLE(entry);
+  }
+
+  #undef NEXT_VISIBLE
+  // Note: ENTRY_HIDDEN remains defined at file scope for use in menu_select/menu_len  
   
   u8g2_SendBuffer(&u8g2);
 }
@@ -791,6 +869,15 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
     fsel_state.none_str = entry->image->none_str;
     fsel_state.none_icn = entry->image->none_icn;
     fsel_state.action = entry->image->action;
+	fsel_state.is_config_sel = false;
+  } else if(entry->type == CONFIG_MENU_ENTRY_CFGSEL) {
+    menu_debugf("opening config file selector");
+    fsel_state.ext = entry->cfgsel->ext;
+    fsel_state.index = MAX_DRIVES - 1;  // dedicated slot (6), avoids CWD conflict with DF0..DH1
+    fsel_state.none_str = NULL;
+    fsel_state.none_icn = NULL;
+    fsel_state.action = entry->cfgsel->action;
+    fsel_state.is_config_sel = true;
   } else {
     menu_debugf("opening drive image selector");
     fsel_state.ext = entry->fsel->ext;
@@ -798,6 +885,7 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
     fsel_state.none_str = NULL;
     fsel_state.none_icn = NULL;
     fsel_state.action = entry->fsel->action;
+	fsel_state.is_config_sel = false;
   }
     
   // The file selector usually works on the sd card as that is what
@@ -807,7 +895,10 @@ static void menu_file_selector_open(config_menu_entry_t *entry) {
 
   // Initialize current working directory if needed
   if(!sdc_get_cwd(fsel_state.index)) {
-    bool is_usb = strncasecmp(entry->fsel->def, "/usb", 4) == 0;
+    const char *def = (entry->type == CONFIG_MENU_ENTRY_IMAGE)  ? entry->image->def :
+                      (entry->type == CONFIG_MENU_ENTRY_CFGSEL) ? entry->cfgsel->def :
+                                                                   entry->fsel->def;
+    bool is_usb = def && strncasecmp(def, "/usb", 4) == 0;
     
     // check if USB is to be used but isn't present
     if(is_usb && (disk_status(1) != RES_OK)) {
@@ -922,8 +1013,37 @@ static void menu_fileselector_select(sdc_dir_entry_t *entry) {
       }
     }
   } else {
-    // request insertion of this image
-    sdc_image_open(drive, entry->name);
+    // check if this is a config file selector
+    if(fsel_state.is_config_sel) {
+      // build path relative to CARD_MOUNTPOINT for inifile_read()
+      // e.g. cwd="/sd"        + "ags.amiga.ini" -> "ags.amiga.ini"
+      //      cwd="/sd/configs" + "ags.amiga.ini" -> "configs/ags.amiga.ini"
+      const char *cwd = sdc_get_cwd(drive);
+      const char *cwd_rel = cwd + strlen(CARD_MOUNTPOINT);  // "" or "/subdir"
+      char ini_path[FF_LFN_BUF + 10];
+      if(cwd_rel[0] == '\0')
+        snprintf(ini_path, sizeof(ini_path), "%s", entry->name);
+      else
+        snprintf(ini_path, sizeof(ini_path), "%s/%s", cwd_rel + 1, entry->name);
+
+      menu_debugf("loading config from '%s'", ini_path);
+      inifile_read(ini_path);
+
+      // return to parent menu
+      menu_pop();
+
+      // Run reset action first (R=1 → delay → R=0 → hide).
+      // SPI registers are not cleared by reset, so sdc_mount_defaults()
+      // can safely follow — mirroring the boot sequence:
+      //   init(R=1) → sdc_mount_defaults() → ready(R=0)
+      if(fsel_state.action)
+        sys_run_action(fsel_state.action);
+
+      // Mount drives/images exactly once, after any reset has completed.
+      sdc_mount_defaults();
+    } else {
+      // request insertion of this image
+      sdc_image_open(drive, entry->name);
     
     // return to parent form
     menu_pop();
@@ -1019,12 +1139,27 @@ static void menu_select(void) {
     menu_fileselector_select(dir_entry(menu_state->dir, menu_state->selected-1));
     return;
   }
-  
+
+  // skip invisible entries while walking to selected position
+  int pos = 0;
+  while(entry && pos < menu_state->selected - 1) {
+    entry = entry->next;
+    while(entry && ENTRY_HIDDEN(entry))
+      entry = entry->next;
+    pos++;
+  }
+  if(!entry) return;
+	
   menu_debugf("Selected: %s '%s'", config_menuentry_get_type_str(entry), menuentry_get_label(entry));
 
   switch(entry->type) {
   case CONFIG_MENU_ENTRY_FILESELECTOR:
     // user has choosen a file selector
+    menu_file_selector_open(entry);
+    break;
+
+  case CONFIG_MENU_ENTRY_CFGSEL:
+    // user has choosen a config file selector
     menu_file_selector_open(entry);
     break;
     
