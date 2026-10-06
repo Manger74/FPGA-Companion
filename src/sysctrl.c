@@ -406,7 +406,10 @@ void sys_run_action(config_action_t *action) {
       
     case CONFIG_ACTION_COMMAND_SAVE:
       sys_debugf("SAVE %s", command->filename);
-      inifile_write(command->filename);
+        // Save back to whichever .ini was last loaded, so that e.g. selecting
+      // ags.amiga.ini and then "Save settings" writes to ags.amiga.ini, not
+      // the default amiga.ini that is hardcoded in the XML action.
+      inifile_write(inifile_get_current() ? inifile_get_current() : command->filename);
       break;
       
     case CONFIG_ACTION_COMMAND_HIDE:
