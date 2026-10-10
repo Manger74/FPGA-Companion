@@ -1303,6 +1303,20 @@ static void mcu_hw_wifi_init(void) {
 
   netif_set_status_callback(netif_default, netif_status_callback);
 
+#ifdef ENABLE_BLUETOOTH
+  // bluetooth needs nothing from config.ini, start it right away
+  bluetooth_run();
+#endif
+
+  // after a cold start com_task reads config.ini only once the FPGA
+  // is up, so wait for it before deciding whether to connect. Without
+  // an FPGA it waits until com_task detects one and restarts
+  if(!inifile_config_is_read()) {
+    debugf("WiFi: waiting for the configuration from the card");
+    inifile_config_wait();
+    debugf("WiFi: configuration is available");
+  }
+
   // connect to wifi immediately if configured through config file
   if(inifile_config_has("wifi", "ssid") && inifile_config_has("wifi", "pass")) {
     network_status |= NETWORK_STATUS_WIFI_AUTO;
