@@ -335,7 +335,9 @@ static err_t lan_input(struct pbuf *p, struct netif *inp) {
   return ERR_OK;
 }
 
-static void lan_attach(struct peer *pe) {
+// hook the lan interfaces that share a subnet with the peer. announce: tell the network again that the
+// peer is behind us even if the interface was hooked before (new session); without it only new interfaces
+static void lan_attach(struct peer *pe, bool announce) {
   struct netif *n;
   pe->up = true;
 
@@ -347,11 +349,13 @@ static void lan_attach(struct peer *pe) {
     for(int i = 0; i < MAX_LAN && slot < 0; i++) if(!lan[i].netif)    slot = i;
     if(slot < 0) continue;
 
-    if(n->input != lan_input) {   // interface may have been re-added since
+    bool fresh = n->input != lan_input;
+    if(fresh) {                   // new, or the interface has been re-added since
       lan[slot].netif = n;
       lan[slot].input = n->input;
       n->input = lan_input;
     }
+    if(!fresh && !announce) continue;
 
     // tell the network that the peer's address is now behind us
     static const struct eth_addr bcast = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
@@ -377,7 +381,10 @@ void ppp_port_peer_set(int id, struct netif *n, const ip4_addr_t *ip, bool slow)
   peers[id].slow = slow;
 }
 
-void ppp_port_peer_up(int id)   { lan_attach(&peers[id]); }
+void ppp_port_peer_up(int id)   { lan_attach(&peers[id], true); }
+
+// a peer that came up before the lan did (wifi connects later): hook the lan once it has an address
+void ppp_port_peer_poll(int id) { if(peers[id].up) lan_attach(&peers[id], false); }
 void ppp_port_peer_down(int id) { lan_detach(&peers[id]); }
 
 // called by lwIP, tcpip thread

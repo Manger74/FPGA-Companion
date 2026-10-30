@@ -24,6 +24,7 @@ struct ip4_addr;
 void ppp_port_peer_set(int id, struct netif *n, const struct ip4_addr *ip, bool slow);
 void ppp_port_peer_up(int id);
 void ppp_port_peer_down(int id);
+void ppp_port_peer_poll(int id);   // up, but the lan may have got its address later
 
 // true once lwIP has been initialized (implemented in mcu_hw.c)
 bool mcu_hw_tcpip_ready(void);

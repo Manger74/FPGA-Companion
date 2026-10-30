@@ -295,7 +295,7 @@ static void plip_task(void *arg) {
   debugf("PLIP: up, companion %s, amiga %s", ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)),
 	 ip4addr_ntoa_r(&peer_ip, his, sizeof(his)));
 
-  TickType_t last_stats = xTaskGetTickCount();
+  TickType_t last_stats = xTaskGetTickCount(), last_lan = last_stats;
   uint32_t last_rx = 0, last_tx = 0;
 
   for(;;) {
@@ -303,6 +303,12 @@ static void plip_task(void *arg) {
     service();
 
     TickType_t now = xTaskGetTickCount();
+    if(now - last_lan >= pdMS_TO_TICKS(1000)) {    // wifi may get its address long after we started
+      last_lan = now;
+      LOCK_TCPIP_CORE();
+      ppp_port_peer_poll(PEER_PLIP);
+      UNLOCK_TCPIP_CORE();
+    }
     if(now - last_stats >= pdMS_TO_TICKS(STATS_MS)) {
       last_stats = now;
       if(n_rx != last_rx || n_tx != last_tx) net_log_stats();   // only while something happens

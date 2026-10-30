@@ -122,8 +122,9 @@ static uint32_t ip_of(const uint8_t *ip, int off) { uint32_t v; memcpy(&v, ip + 
 int main(void) {
   static const uint8_t bcast[6] = {255,255,255,255,255,255}, zero[6] = {0};
   lwip_init();
+  // like the Pico: the lan (wifi) has no address yet when the plip task starts
   ip4_addr_t a, mk, gw; IP4_ADDR(&a, 192,168,1,10); IP4_ADDR(&mk, 255,255,255,0); IP4_ADDR(&gw, 192,168,1,1);
-  netif_add(&lanif, &a, &mk, &gw, NULL, lan_init, netif_input);
+  netif_add(&lanif, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4, NULL, lan_init, netif_input);
   netif_set_default(&lanif); netif_set_up(&lanif); netif_set_link_up(&lanif);
 
   lanif_out_n = 0;
@@ -131,8 +132,15 @@ int main(void) {
   CHECK(task_fn != NULL, "task created when [plip] enable=1");
   if(!setjmp(back)) task_fn(NULL);
   CHECK(m.en && !m.loop, "core configured: enable, no loopback");
-  CHECK(lanif_out_n == 1 && lanif_out[0][12] == 8 && lanif_out[0][13] == 6, "gratuitous ARP for the peer on the lanif");
+  CHECK(lanif_out_n == 0 && lanif.input != lan_input, "lan has no address yet: nothing hooked, nothing announced");
+  netif_set_addr(&lanif, &a, &mk, &gw);                   // wifi got its address
   lanif_out_n = 0;
+  ppp_port_peer_poll(PEER_PLIP);                           // what plip_task does every second
+  CHECK(lanif_out_n == 1 && lanif_out[0][12] == 8 && lanif_out[0][13] == 6 && lanif.input == lan_input,
+	"lan got its address later: hooked and gratuitous ARP for the peer");
+  lanif_out_n = 0;
+  ppp_port_peer_poll(PEER_PLIP);
+  CHECK(lanif_out_n == 0, "next poll: no repeated announcement");
 
   uint8_t f[1600]; int n;
 
