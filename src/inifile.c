@@ -436,6 +436,12 @@ static const struct {
   { "PPP", "IP", CONFIG_TYPE_IP, NULL },
   { "PPP", "PEER", CONFIG_TYPE_IP, NULL },
 
+  // PLIP: Amiga parallel port, see plip_port.c
+  { "PLIP", "ENABLE", CONFIG_TYPE_INT, NULL },
+  { "PLIP", "LOOPBACK", CONFIG_TYPE_INT, NULL },
+  { "PLIP", "IP", CONFIG_TYPE_IP, NULL },
+  { "PLIP", "PEER", CONFIG_TYPE_IP, NULL },
+
   // MENU/OSD
   { "MENU", "GAMEPAD_TRIGGER", CONFIG_TYPE_INT, NULL },  
   { "MENU", "HOTKEY", CONFIG_TYPE_HIDKEY, NULL },

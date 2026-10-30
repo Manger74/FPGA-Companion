@@ -11,6 +11,20 @@
 
 #include <stdbool.h>
 
+// peers are hosts behind an interface of the Companion (ppp or plip) which appear as hosts of the
+// lan: proxy ARP and forwarding in both directions, see ppp_port.c
+#define PORT_PEERS  2
+#define PEER_PPP    0
+#define PEER_PLIP   1
+
+struct netif;
+struct ip4_addr;
+
+// interface and address of a peer, then up/down when it can be reached. Core lock held, lwIP thread or task
+void ppp_port_peer_set(int id, struct netif *n, const struct ip4_addr *ip, bool slow);
+void ppp_port_peer_up(int id);
+void ppp_port_peer_down(int id);
+
 // true once lwIP has been initialized (implemented in mcu_hw.c)
 bool mcu_hw_tcpip_ready(void);
 

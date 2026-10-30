@@ -133,17 +133,36 @@ static void tx_thread(void *arg) {
 
 #define MAX_LAN 2
 static struct { struct netif *netif; netif_input_fn input; } lan[MAX_LAN];
-static ip4_addr_t peer_ip;
-static bool peer_up;
 
-static bool peer_on_link(struct netif *n) {
-  return !ip4_addr_isany_val(*netif_ip4_addr(n)) &&
-    ip4_addr_netcmp(&peer_ip, netif_ip4_addr(n), netif_ip4_netmask(n));
+// peers behind point-to-point or private interfaces: 0 = ppp, 1 = plip (plip_port.c)
+static struct peer { struct netif *netif; ip4_addr_t ip; bool slow; bool up; } peers[PORT_PEERS];
+
+static struct peer *peer_by_ip(const ip4_addr_t *ip) {
+  for(int i = 0; i < PORT_PEERS; i++)
+    if(peers[i].up && ip4_addr_cmp(ip, &peers[i].ip)) return &peers[i];
+  return NULL;
 }
 
-// ip4_route() hook (lwipopts.h): the peer is always reached via ppp, even if it is in a lan subnet
+static struct peer *peer_by_netif(const struct netif *n) {
+  for(int i = 0; i < PORT_PEERS; i++)
+    if(peers[i].netif == n) return &peers[i];
+  return NULL;
+}
+
+static bool peer_any_up(void) {
+  for(int i = 0; i < PORT_PEERS; i++) if(peers[i].up) return true;
+  return false;
+}
+
+static bool peer_on_link(const struct peer *p, struct netif *n) {
+  return n != p->netif && !ip4_addr_isany_val(*netif_ip4_addr(n)) &&
+    ip4_addr_netcmp(&p->ip, netif_ip4_addr(n), netif_ip4_netmask(n));
+}
+
+// ip4_route() hook (lwipopts.h): a peer is always reached via its interface, even if it is in a lan subnet
 struct netif *ppp_port_route(const ip4_addr_t *dest) {
-  return (peer_up && ip4_addr_cmp(dest, &peer_ip)) ? &ppp_netif : NULL;
+  struct peer *p = peer_by_ip(dest);
+  return p ? p->netif : NULL;
 }
 
 // TCP segments passing through are adapted to the slow ppp link (the options must lie completely
@@ -170,12 +189,12 @@ static void tcp_patch(u8_t *tcp, u16_t pos, u8_t val) {   // pos: offset in the 
   tcp[pos] = val;
 }
 
-static void tcp_fixup(struct pbuf *p, u16_t hl, u16_t len, bool from_peer) {
+static void tcp_fixup(struct pbuf *p, u16_t hl, u16_t len, u16_t mtu, bool from_peer) {
   u8_t *ip = (u8_t *)p->payload, *tcp = ip + hl;
   u16_t thl, i, mss, max, wnd, wmax;
 
-  if(ppp_netif.mtu <= IP_HLEN + TCP_HLEN) return;
-  max = ppp_netif.mtu - IP_HLEN - TCP_HLEN;
+  if(mtu <= IP_HLEN + TCP_HLEN) return;
+  max = mtu - IP_HLEN - TCP_HLEN;
   if(IPH_PROTO((struct ip_hdr *)ip) != IP_PROTO_TCP || (lwip_ntohs(IPH_OFFSET((struct ip_hdr *)ip)) & IP_OFFMASK)) return;
   if(len < hl + TCP_HLEN || p->len < hl + TCP_HLEN) return;
 
@@ -212,11 +231,12 @@ static void tcp_fixup(struct pbuf *p, u16_t hl, u16_t len, bool from_peer) {
 int ppp_port_ip4_input(struct pbuf *p, struct netif *inp) {
   struct ip_hdr *ip = (struct ip_hdr *)p->payload;
   struct netif *out, *n;
+  struct peer *from, *to = NULL, *slow;
   const ip4_addr_t *hop;
   ip4_addr_t dst;
   u16_t hl, len;
 
-  if(!peer_up || p->len < IP_HLEN || IPH_V(ip) != 4) return 0;
+  if(!peer_any_up() || p->len < IP_HLEN || IPH_V(ip) != 4) return 0;
   hl = IPH_HL_BYTES(ip);
   len = lwip_ntohs(IPH_LEN(ip));
   if(hl < IP_HLEN || p->len < hl || p->tot_len < len || len < hl || IPH_TTL(ip) <= 1) return 0;
@@ -226,29 +246,37 @@ int ppp_port_ip4_input(struct pbuf *p, struct netif *inp) {
   NETIF_FOREACH(n)                                   // addressed to the companion itself
     if(ip4_addr_cmp(&dst, netif_ip4_addr(n))) return 0;
 
-  if(inp == &ppp_netif) {                            // peer -> lan or internet
-    if(!ip4_addr_cmp(&ip->src, &peer_ip)) return 0;  // only its own address
+  from = peer_by_netif(inp);
+  if(from) {                                         // peer -> lan, internet or other peer
+    if(!from->up || !ip4_addr_cmp(&ip->src, &from->ip)) return 0;   // only its own address
     out = ip4_route(&dst);
-    if(!out || out == &ppp_netif) return 0;
-    hop = ip4_addr_netcmp(&dst, netif_ip4_addr(out), netif_ip4_netmask(out)) ? &dst : netif_ip4_gw(out);
-    if(ip4_addr_isany(hop)) hop = &dst;
-  } else if(ip4_addr_cmp(&dst, &peer_ip)) {          // lan -> peer
-    out = &ppp_netif;
-    hop = &peer_ip;
+    if(!out || out == inp) return 0;
+    to = peer_by_netif(out);
+    if(to) hop = &to->ip;
+    else {
+      hop = ip4_addr_netcmp(&dst, netif_ip4_addr(out), netif_ip4_netmask(out)) ? &dst : netif_ip4_gw(out);
+      if(ip4_addr_isany(hop)) hop = &dst;
+    }
+  } else if((to = peer_by_ip(&dst))) {               // lan -> peer
+    out = to->netif;
+    hop = &to->ip;
   } else return 0;
 
-  // only lan -> peer can be too big (the ppp mtu is small), dropped silently if it must not be fragmented
+  // a slow link (ppp) is protected from the speed of the other side
+  slow = (from && from->slow) ? from : ((to && to->slow) ? to : NULL);
+
+  // a packet can be too big for the out interface (ppp mtu is small), dropped silently if it must not be fragmented
   if(len > out->mtu && (lwip_ntohs(IPH_OFFSET(ip)) & IP_DF)) return 0;
   if(p->tot_len > len) pbuf_realloc(p, len);         // strip ethernet padding
 
-  tcp_fixup(p, hl, len, inp == &ppp_netif);
+  if(slow) tcp_fixup(p, hl, len, slow->netif->mtu, slow == from);
   IPH_TTL_SET(ip, IPH_TTL(ip) - 1);
   IPH_CHKSUM_SET(ip, 0);
   IPH_CHKSUM_SET(ip, inet_chksum(ip, hl));
 
   if(len > out->mtu) ip4_frag(p, out, hop);
-  else if(out == &ppp_netif) out->output(out, p, hop);
-  else {                                             // ppp buffers have no room for the ethernet header
+  else if(to) out->output(out, p, hop);
+  else {                                             // peer buffers have no room for the ethernet header
     struct pbuf *q = pbuf_alloc(PBUF_LINK, p->tot_len, PBUF_RAM);
     if(q) {
       if(pbuf_copy(q, p) == ERR_OK) out->output(out, q, hop);
@@ -259,8 +287,8 @@ int ppp_port_ip4_input(struct pbuf *p, struct netif *inp) {
   return 1;
 }
 
-// ARP reply (or gratuitous request) in the name of the peer
-static void arp_send(struct netif *n, u16_t op, const struct eth_addr *eth_dst,
+// ARP reply (or gratuitous request) in the name of a peer
+static void arp_send(struct netif *n, const ip4_addr_t *ip_src, u16_t op, const struct eth_addr *eth_dst,
 		     const struct eth_addr *hw_dst, const ip4_addr_t *ip_dst) {
   struct pbuf *p = pbuf_alloc(PBUF_LINK, SIZEOF_ETH_HDR + SIZEOF_ETHARP_HDR, PBUF_RAM);
   if(!p) return;
@@ -278,7 +306,7 @@ static void arp_send(struct netif *n, u16_t op, const struct eth_addr *eth_dst,
   arp->protolen = sizeof(ip4_addr_t);
   arp->opcode   = PP_HTONS(op);
   memcpy(&arp->shwaddr, n->hwaddr, ETH_HWADDR_LEN);
-  memcpy(&arp->sipaddr, &peer_ip, sizeof(ip4_addr_t));
+  memcpy(&arp->sipaddr, ip_src, sizeof(ip4_addr_t));
   memcpy(&arp->dhwaddr, hw_dst, ETH_HWADDR_LEN);
   memcpy(&arp->dipaddr, ip_dst, sizeof(ip4_addr_t));
 
@@ -295,9 +323,9 @@ static err_t lan_input(struct pbuf *p, struct netif *inp) {
     memcpy(&dip, &arp->dipaddr, sizeof(dip));
     memcpy(&sip, &arp->sipaddr, sizeof(sip));
 
-    if(arp->opcode == PP_HTONS(ARP_REQUEST) && peer_up &&
-       ip4_addr_cmp(&dip, &peer_ip) && peer_on_link(inp))
-      arp_send(inp, ARP_REPLY, &arp->shwaddr, &arp->shwaddr, &sip);
+    struct peer *pe = peer_by_ip(&dip);
+    if(arp->opcode == PP_HTONS(ARP_REQUEST) && pe && peer_on_link(pe, inp))
+      arp_send(inp, &pe->ip, ARP_REPLY, &arp->shwaddr, &arp->shwaddr, &sip);
   }
 
   for(int i = 0; i < MAX_LAN; i++)
@@ -307,12 +335,12 @@ static err_t lan_input(struct pbuf *p, struct netif *inp) {
   return ERR_OK;
 }
 
-static void lan_attach(void) {
+static void lan_attach(struct peer *pe) {
   struct netif *n;
-  peer_up = true;
+  pe->up = true;
 
   NETIF_FOREACH(n) {
-    if(n == &ppp_netif || !(n->flags & NETIF_FLAG_ETHARP) || !peer_on_link(n)) continue;
+    if(peer_by_netif(n) || !(n->flags & NETIF_FLAG_ETHARP) || !peer_on_link(pe, n)) continue;
 
     int slot = -1;
     for(int i = 0; i < MAX_LAN && slot < 0; i++) if(lan[i].netif == n) slot = i;
@@ -328,18 +356,29 @@ static void lan_attach(void) {
     // tell the network that the peer's address is now behind us
     static const struct eth_addr bcast = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
     static const struct eth_addr zero  = {{0, 0, 0, 0, 0, 0}};
-    arp_send(n, ARP_REQUEST, &bcast, &zero, &peer_ip);
-    debugf("PPP: %s is reachable via %c%c", ip4addr_ntoa(&peer_ip), n->name[0], n->name[1]);
+    arp_send(n, &pe->ip, ARP_REQUEST, &bcast, &zero, &pe->ip);
+    debugf("NET: %s is reachable via %c%c", ip4addr_ntoa(&pe->ip), n->name[0], n->name[1]);
   }
 }
 
-static void lan_detach(void) {
-  peer_up = false;
+static void lan_detach(struct peer *pe) {
+  pe->up = false;
+  if(peer_any_up()) return;     // the lan hook is still needed for the other peer
   for(int i = 0; i < MAX_LAN; i++) {
     if(lan[i].netif && lan[i].netif->input == lan_input) lan[i].netif->input = lan[i].input;
     lan[i].netif = NULL;
   }
 }
+
+// the interface of a peer and its address. Only the core lock may be held
+void ppp_port_peer_set(int id, struct netif *n, const ip4_addr_t *ip, bool slow) {
+  peers[id].netif = n;
+  peers[id].ip = *ip;
+  peers[id].slow = slow;
+}
+
+void ppp_port_peer_up(int id)   { lan_attach(&peers[id]); }
+void ppp_port_peer_down(int id) { lan_detach(&peers[id]); }
 
 // called by lwIP, tcpip thread
 static void ppp_status(ppp_pcb *pcb, int err, void *ctx) {
@@ -347,10 +386,10 @@ static void ppp_status(ppp_pcb *pcb, int err, void *ctx) {
 
   if(err == PPPERR_NONE) {
     debugf("PPP: up, our address %s", ip4addr_ntoa(netif_ip4_addr(pcb->netif)));
-    lan_attach();
+    ppp_port_peer_up(PEER_PPP);
   } else {
     debugf("PPP: down, error %d", err);
-    lan_detach();
+    ppp_port_peer_down(PEER_PPP);
     ended = true;
   }
 }
@@ -388,7 +427,7 @@ bool ppp_port_listen(void) {
   if(ppp) {
     ppp_set_ipcp_ouraddr(ppp, &ours);
     ppp_set_ipcp_hisaddr(ppp, &his);
-    peer_ip = his;
+    ppp_port_peer_set(PEER_PPP, &ppp_netif, &his, true);
 
     // pass the name server on, if we have one
     const ip_addr_t *dns = dns_getserver(0);
