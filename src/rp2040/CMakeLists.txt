@@ -28,16 +28,17 @@ set(PICO_BOARD pico_w CACHE STRING "Board type")
 
 # The BOARD option selects which board to build for
 # Regular Pico (W) by default
-set(BOARD PICO CACHE STRING "Board type. Can be PICO, PICO2, WS2040ZERO, SH20KLITE, DEV20K, MSP20K")
+set(BOARD PICO CACHE STRING "Board type. Can be PICO, PICO2, WS2040ZERO, SH20KLITE, DEV20K, MSP20K, MSP2_20K, DEV25K")
 
-set(BOARDS PICO PICO2 WS2040ZERO SH20KLITE DEV20K MSP20K)
+set(BOARDS PICO PICO2 WS2040ZERO SH20KLITE DEV20K MSP20K MSP2_20K DEV25K)
 if( NOT BOARD IN_LIST BOARDS)
     message(FATAL_ERROR "BOARD must be one of ${BOARDS}")
 endif()
 
 # This will also work for the the Pico-W and the regular Pico. The
 # firmware detects it and acts accordingly
-if(${BOARD} STREQUAL PICO2)
+set(PICO2BOARDS PICO2 DEV25K MSP2_20K)
+if( BOARD IN_LIST PICO2BOARDS)
    message("Building for RP2350")
    set(PICO_BOARD pico2_w)
    set(TARGET rp2350)
@@ -70,6 +71,7 @@ add_library(u8g2 ${U8G2_SRC})
 add_executable(${PROJECT}
 	../main.c
 	mcu_hw.c
+	bluetooth.c
 	../sysctrl.c
 	../hidparser.c
 	../hid.c
@@ -83,24 +85,30 @@ add_executable(${PROJECT}
 	../fatfs/source/ffunicode.c
 	../u8g2/sys/bitmap/common/u8x8_d_bitmap.c
 	../tusb_xinput/xinput_host.c
+	../tusb_asix/asix_host.c
 	../config.c
 	../freertos_callbacks.c
 	../xml.c
-   ../ps2helper.c
+	../ps2helper.c
+	../ftpd.c
+	../telnetd.c
+	../hidkeys.c
 )
 
 family_add_pico_pio_usb(${PROJECT})
 
 target_compile_definitions(${PROJECT} PRIVATE
+        PICO_FLASH_ASSUME_CORE1_SAFE=1
         PIO_USB_DP_PIN_DEFAULT=2
         PICO_DEFAULT_PIO_USB_DP_PIN=2
-        )
+	# CFG_TUSB_DEBUG=2
+)
 
 if(${BOARD} STREQUAL PICO)
-   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=0)
+   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=0 ENABLE_WIFI ENABLE_BLUETOOTH)
    add_custom_command(TARGET ${PROJECT} POST_BUILD COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --cyan "Firmware has been built for Raspberry Pi Pico or Pico-W.")
 elseif(${BOARD} STREQUAL PICO2)
-   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=1)
+   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=1 ENABLE_WIFI ENABLE_BLUETOOTH)
    add_custom_command(TARGET ${PROJECT} POST_BUILD COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --cyan "Firmware has been built for Raspberry Pi Pico2 or Pico2-W.")
 elseif(${BOARD} STREQUAL WS2040ZERO)
    add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=2)
@@ -120,13 +128,29 @@ elseif(${BOARD} STREQUAL DEV20K)
    target_sources(${PROJECT} PRIVATE usb_descriptors.c)
    target_link_libraries(${PROJECT} PRIVATE tinyusb_device)
 elseif(${BOARD} STREQUAL MSP20K)
-   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=5)
+   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=5 ENABLE_WIFI ENABLE_BLUETOOTH)
    add_custom_command(TARGET ${PROJECT} POST_BUILD COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --cyan "Firmware has been built for MiSTeryShieldPicoTN20k.")
    target_sources(${PROJECT} PRIVATE ../jtag.c ../gowin.c usb_jtag.c)
    target_sources(${PROJECT} PRIVATE usb_descriptors.c)
    target_link_libraries(${PROJECT} PRIVATE tinyusb_device)
+elseif(${BOARD} STREQUAL DEV25K)
+   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=6)
+   add_custom_command(TARGET ${PROJECT} POST_BUILD COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --cyan "Firmware has been built for GW3A/GW5A Dev25k.")
+   target_sources(${PROJECT} PRIVATE sdio.c ../jtag.c ../gowin.c usb_jtag.c)
+   target_sources(${PROJECT} PRIVATE usb_descriptors.c)
+   target_sources(${PROJECT} PRIVATE ../pio_jtag.c)
+   target_link_libraries(${PROJECT} PRIVATE tinyusb_device)
+   pico_generate_pio_header(${PROJECT} ${CMAKE_CURRENT_LIST_DIR}/jtag.pio)
+elseif(${BOARD} STREQUAL MSP2_20K)
+   add_compile_definitions(${PROJECT} PRIVATE MISTLE_BOARD=7 ENABLE_WIFI ENABLE_BLUETOOTH)
+   add_custom_command(TARGET ${PROJECT} POST_BUILD COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --cyan "Firmware has been built for MiSTeryShieldPico2_TN20k.")
+   target_sources(${PROJECT} PRIVATE ../jtag.c ../gowin.c usb_jtag.c)
+   target_sources(${PROJECT} PRIVATE usb_descriptors.c)
+   target_sources(${PROJECT} PRIVATE ../pio_jtag.c)
+   target_link_libraries(${PROJECT} PRIVATE tinyusb_device)
+   pico_generate_pio_header(${PROJECT} ${CMAKE_CURRENT_LIST_DIR}/jtag.pio)
 else()
-   message(FATAL_ERROR "BOARD must be PICO, PICO2, WS2040ZERO, SH20KLITE, DEV20K or MSP20K")
+   message(FATAL_ERROR "BOARD must be PICO, PICO2, WS2040ZERO, SH20KLITE, DEV20K, MSP20K, MSP2_20K or DEV25K")
 endif()
 
 target_include_directories(${PROJECT} PRIVATE
@@ -134,6 +158,7 @@ target_include_directories(${PROJECT} PRIVATE
       ${CMAKE_CURRENT_LIST_DIR}/../fatfs/source
       ${CMAKE_CURRENT_LIST_DIR}/../u8g2/csrc
       ${CMAKE_CURRENT_LIST_DIR}/../tusb_xinput
+      ${CMAKE_CURRENT_LIST_DIR}/../tusb_asix
 )
 
 string(APPEND CMAKE_C_FLAGS " -Os -fdata-sections -ffunction-sections -Wno-error=incompatible-pointer-types" )
@@ -142,7 +167,9 @@ target_link_libraries(${PROJECT} PRIVATE pico_stdlib pico_multicore)
 target_link_libraries(${PROJECT} PRIVATE FreeRTOS-Kernel FreeRTOS-Kernel-Heap4)
 target_link_libraries(${PROJECT} PRIVATE hardware_pio hardware_dma hardware_spi hardware_adc)
 target_link_libraries(${PROJECT} PRIVATE pico_cyw43_arch_lwip_sys_freertos)
-target_link_libraries(${PROJECT} PRIVATE tinyusb_common_base tinyusb_host tinyusb_common tinyusb_board u8g2)
+target_link_libraries(${PROJECT} PRIVATE pico_btstack_cyw43 pico_btstack_classic)
+target_link_libraries(${PROJECT} PRIVATE tinyusb_host tinyusb_board u8g2)
+target_link_libraries(${PROJECT} PRIVATE pico_lwip_sntp)
 
 pico_add_extra_outputs(${PROJECT})
 pico_enable_stdio_usb(${PROJECT} 0)

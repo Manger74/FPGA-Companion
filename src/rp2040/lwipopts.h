@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 // See https://www.nongnu.org/lwip/2_1_x/group__lwip__opts.html for details.
 // Also, see https://gitlab.com/slimhazard/picow_http/-/wikis/Configuring-lwipopts.h
 
@@ -19,11 +21,11 @@
 #define MAX_CONCURRENT_CX_HINT      6
 #endif
 
-#define NUM_SERVER_HINT             1
+#define NUM_SERVER_HINT             4
 
 // allow override in some examples
 #ifndef LWIP_SOCKET
-#define LWIP_SOCKET                 0
+#define LWIP_SOCKET                 1
 #endif
 #if PICO_CYW43_ARCH_POLL
 #define MEM_LIBC_MALLOC             1
@@ -40,11 +42,12 @@
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
 #define TCP_MSS                     1460
-# define TCP_WND                    (MAX_CONCURRENT_CX_HINT * TCP_MSS)
+#define TCP_WND                     (MAX_CONCURRENT_CX_HINT * TCP_MSS)
 #define TCP_SND_BUF                 (MAX_CONCURRENT_CX_HINT * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define TCP_LISTEN_BACKLOG          1
-# define MEMP_NUM_TCP_SEG           32
+#define MEMP_NUM_TCP_SEG            32
+#define MEMP_NUM_NETCONN            8
 #define MEMP_NUM_TCP_PCB            (MAX_CONCURRENT_CX_HINT)
 #define MEMP_NUM_TCP_PCB_LISTEN     (NUM_SERVER_HINT)
 
@@ -67,6 +70,20 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
+
+// enable PPP for wireless via esp32
+#if MISTLE_BOARD == 6
+#define PPP_SUPPORT                 1
+#define PPPOS_SUPPORT               1
+#endif
+
+#define LWIP_DHCP_GET_NTP_SRV       1
+#define LWIP_DHCP_MAX_NTP_SERVERS   2
+#define SNTP_SERVER_DNS             1
+void sntp_set_system_time(uint32_t sec);
+#define SNTP_SET_SYSTEM_TIME        sntp_set_system_time
+#define SO_REUSE                    1
+#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 2)
 
 #ifndef NDEBUG
 #define LWIP_DEBUG                  1
@@ -102,12 +119,24 @@
 #define PPP_DEBUG                   LWIP_DBG_OFF
 #define SLIP_DEBUG                  LWIP_DBG_OFF
 #define DHCP_DEBUG                  LWIP_DBG_OFF
+#define SNTP_DEBUG                  LWIP_DBG_OFF
 
 #define TCPIP_THREAD_STACKSIZE 1024
 #define DEFAULT_THREAD_STACKSIZE 1024
 #define TCPIP_THREAD_PRIO 4
+#if defined(PICO_RP2350)
+#define DEFAULT_RAW_RECVMBOX_SIZE 32
+#define DEFAULT_UDP_RECVMBOX_SIZE 64
+#define DEFAULT_TCP_RECVMBOX_SIZE 64
+#define DEFAULT_ACCEPTMBOX_SIZE 32
+#define TCPIP_MBOX_SIZE 64
+#else
 #define DEFAULT_RAW_RECVMBOX_SIZE 8
+#define DEFAULT_UDP_RECVMBOX_SIZE 8
+#define DEFAULT_TCP_RECVMBOX_SIZE 8
+#define DEFAULT_ACCEPTMBOX_SIZE 8
 #define TCPIP_MBOX_SIZE 8
+#endif
 #define LWIP_TIMEVAL_PRIVATE 0
 
 // not necessary, can be done either way
@@ -115,6 +144,7 @@
 
 // ping_thread sets socket receive timeout, so enable this feature
 #define LWIP_SO_RCVTIMEO 1
+#define LWIP_SO_SNDTIMEO 1
 
 // This section enables HTTPD server with SSI, SGI
 // and tells server which converted HTML files to use.

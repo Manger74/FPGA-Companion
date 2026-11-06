@@ -1,17 +1,21 @@
 /* hid.h */
 
-#ifndef HID_H
-#define HID_H
+#ifndef _HID_H
+#define _HID_H
 
 #include <stdbool.h>
 #include "hidparser.h"
 
 struct hid_kbd_state_S {
-  unsigned char last_report[8];	
+  unsigned char last_report[8];
+  uint8_t modifiers;
+  uint8_t keys[32];
 };
 
 struct hid_mouse_state_S {
 };
+
+#define NO_JOYSTICK     255
 
 struct hid_joystick_state_S {
   unsigned char last_state;
@@ -21,14 +25,21 @@ struct hid_joystick_state_S {
   unsigned char last_state_btn_extra;
 };
 
+struct hid_consumer_state_S {
+  uint32_t last_state;
+};
+
 typedef union {
   struct hid_kbd_state_S kbd;
   struct hid_mouse_state_S mouse;
   struct hid_joystick_state_S joystick;  
+  struct hid_consumer_state_S consumer;  
 } hid_state_t;
 
 void hid_parse(const hid_report_t *report, hid_state_t *state, uint8_t const* data, uint16_t len);
 
+void kbd_parse_usage_state(struct hid_kbd_state_S *state, uint8_t modifiers,
+                           const uint8_t keys[32]);
 void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state, const unsigned char *buffer, int nbytes);
 void mouse_parse(const hid_report_t *report, struct hid_mouse_state_S *state, const unsigned char *buffer, int nbytes);
 void joystick_parse(const hid_report_t *report, struct hid_joystick_state_S *state, const unsigned char *buffer, int nbytes);
@@ -38,4 +49,4 @@ void hid_handle_event(void);
 uint8_t hid_allocate_joystick(void);
 void hid_release_joystick(uint8_t idx);
 
-#endif // HID_H
+#endif // _HID_H

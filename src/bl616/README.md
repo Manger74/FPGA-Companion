@@ -1,74 +1,145 @@
-# MiSTeryNano FPGA companion BL616 variant
+# MiSTle FPGA companion BL616 variant
 
-This is the variant of the MiSTeryNano FPGA companion firmware
-for the BL616 MCU (M0S Dock).
+This is the variant of the FPGA companion firmware for the BL616 MCU.
 
-## Example wiring M0S Dock
+## Example wiring M0S Dock (BL616 MPU)
 
-![Tang Nano 20k with M0S Dock](m0s_dock_tn20k.png)  
+M0S Dock consists of a M0S PCBA subassembly that is mounted on a carrier PCBA as a M0S Dock.
+![Tang Nano 20k with M0S Dock](m0s_dock_tn20k.png)
+
+|M0S pin<BR>/ Dock|Signal      |BL616 GPIO|Note        |
+|------|------------- |--------|--------------|
+|20    |JTAG TMS[^1]  |GPIO  0 |              |
+|21    |JTAG TCK[^1]  |GPIO  1 |              |
+|22    |              |GPIO  2 |Bootstrap |
+|23    |JTAG TDI[^1]  |GPIO  3 |              |
+|IO 12 |CSN           |GPIO 12 |              |
+|IO 13 |SCK           |GPIO 13 |              |
+|IO 10 |MISO          |GPIO 10 |              |
+|IO 11 |MOSI          |GPIO 11 |              |
+|IO 14 |IRQN          |GPIO 14 |              |
+|14    |JTAG TDO[^1]  |GPIO 20 |              |
+|RX    |BL616 UART RX |GPIO 21 |debug console |
+|TX    |BL616 UART TX |GPIO 22 |debug console |
+|GND   |GND           |        |              |
+|+5V   |+5V   R       |        |              |
+
+[^1]: JTAG FPGA loader
+
+Location JTAG connection TN20k PCBA top side.  
+
+![Tang Nano 20k JTAG](../rp2040/jtag_tn20k.png)
+
+Location GPIO 0,1,3,20 for JTAG purposes on M0S sub-module PCBA. M0S Dock top side. 
+
+![M0S](M0S.png)
 
 ## Tang integrated onboard BL616 MPU
 
-JTAG signals, UART RX and TX are re-purposed as SPI and control interface. MPU is Master and FPGA is slave. UART RX GPIO is board specific and used as an SPI interrupt input. The UART TX GPIO is a board-specific signal used to control the FPGA’s dedicated JTAG hw pins and determine whether the interface operates in native JTAG or SPI mode. Nano 20k always stays in JTAG active enabled mode as both JTAG and SPI are as dedicated hw pins available.
+JTAG signals, UART RX and TX are re-purposed as SPI and control interface. MPU is Master and FPGA is slave. UART RX GPIO is board specific and used as an SPI interrupt input. The UART TX GPIO is a board-specific signal used to control the FPGA’s dedicated JTAG hw pins and determine whether the interface operates in native JTAG or SPI mode. Nano 20k always stays in JTAG active enabled mode as both JTAG and SPI are as dedicated hw pins available.  
 
-|Tang Board wiring BL616|BL616 GPIO|SPI re-use|Note|
-|------------- |----- |--------  |-----|
-|JTAG TMS      |GPIO0 |SPI _SS   |  |
-|JTAG TCK      |GPIO1 |SPI SCK   |  |
-|JTAG TDO      |GPIO2 |SPI MISO  | EN_CHIP BL616 |
-|JTAG TDI      |GPIO3 |SPI MOSI  |  |
-|BL616 UART RX |GPIO x|SPI _IRQ  |  |
-|BL616 UART TX |GPIO x|V_JTAGSELN| 1=JTAG, 0=SPI |
-|BL616 TWI SCL[^1] |GPIO x|UART TX   | debug console |
+**Tang Nano 20k**
+
+| BL616 GPIO | Nano 20k 3921 | Nano 20k 3923 | re-use   | Note          |
+|------------|---------------|---------------|----------|---------------|
+| GPIO 0     | SPI _SS       | SPI _SS       | -        |               |
+| GPIO 1     | SPI SCK       | SPI SCK       | -        |               |
+| GPIO 2     | SPI MISO      | unused        | -        | Bootstrap     |
+| GPIO 3     | SPI MOSI      | unused        | -        |               |
+| GPIO 10    | JTAG TCK      | JTAG TCK      | -        |               |
+| GPIO 11    | BL616 UART TX | BL616 UART TX | -        | debug console |
+| GPIO 12    | JTAG TDI      | JTAG TDI      | -        |               |
+| GPIO 13    | BL616 UART RX | BL616 UART RX | SPI _IRQ |               |
+| GPIO 14    | JTAG TDO      | JTAG TDO      | -        |               |
+| GPIO 16    | JTAG TMS      | JTAG TMS      | -        |               |
+| GPIO 20    | unused        | unused        | UART RX  | debug console |
+| GPIO 27    | unused        | SPI MOSI      | -        |               |
+| GPIO 30    | unused        | SPI MISO      | -        |               |
+
+Nano20k uses default BL616 UART TX for the debug console.  
+
+**Primer / Console / Mega**
+
+| BL616 GPIO | Tang Board wiring BL616 | re-use     | Note          |
+|------------|-------------------------|------------|---------------|
+| GPIO 0     | JTAG TMS                | SPI _SS    |               |
+| GPIO 1     | JTAG TCK                | SPI SCK    |               |
+| GPIO 2     | JTAG TDO                | SPI MISO   | Bootstrap     |
+| GPIO 3     | JTAG TDI                | SPI MOSI   |               |
+| GPIO x     | BL616 UART RX           | SPI _IRQ   |               |
+| GPIO x     | BL616 UART TX           | V_JTAGSELN | 1=JTAG, 0=SPI |
+| GPIO x     | BL616 TWI SCL[^1]       | UART TX    | debug console |
 
 [^1]: The extra TWI SCL connection is only available for Console60k/138k and Mega138k Pro.  
-Nano20k uses default BL616 UART TX for the debug console as no V_JTAGSELN needed.  
-TN20k has a differnt pin mapping and uses GPIO16, GPIO10, GPIO14, GPIO12 for JTAG.  
 
-Primer25K re-use after a needed HW modification by removing capacitor C22 the GPIO12 available at button S3 to access debug console. Mega 60k could likely re-use GPIO 16 or GPIO 17 to output debug data.  
+Primer25K BL616 debug console can be used after a required hardware modification: remove capacitor C22 to make GPIO12 available at button S3 for debug TX console access. Mega60k can likely re-use GPIO16 or GPIO17 for debug output. 
 
-[All in One Build](#tang-onboard-bl616)
+[All in One Build](#all-in-one-build)
 
 ## Compiling and uploading code for the BL616 (Linux)
 
 Download the Bouffalo toolchain:
 
+https://github.com/bouffalolab/toolchain/releases/tag/default
+
+Download `xuantie-gcc-riscv-v2.6.1-linux-x86_64.tar.xz` into your home directory.
+
+Extract it into your home directory. The archive contains the
+`xuantie-gcc-riscv-v2.6.1-linux-x86_64` folder:
 ```bash
-git clone https://github.com/bouffalolab/toolchain_gcc_t-head_linux.git
+tar -xf "$HOME/xuantie-gcc-riscv-v2.6.1-linux-x86_64.tar.xz" -C "$HOME"
 ```
-
-and the patched Bouffalo SDK with latest version common CherryUSB Stack:  
+Add the compiler to your search path:
 ```bash
-git clone --recurse-submodules https://github.com/MiSTle-Dev/bouffalo_sdk.git
+export PATH="$HOME/xuantie-gcc-riscv-v2.6.1-linux-x86_64/bin:$PATH"
 ```
-
-Compile the firmware for **M0S Dock**
-
+and the Bouffalo SDK:
 ```bash
+git clone --recurse-submodules https://github.com/bouffalolab/bouffalo_sdk.git "$HOME/bouffalo_sdk"
+```
+```bash
+export BL_SDK_BASE="$HOME/bouffalo_sdk"
+```
+Clone the FPGA-Companion repository:
+```bash
+cd ~/Documents
 git clone --recurse-submodules https://github.com/MiSTle-Dev/FPGA-Companion.git
-cd FPGA-Companion
-git submodule init
-git submodule update
-CROSS_COMPILE=<where you downloaded the toolchain>/toolchain_gcc_t-head_linux/bin/riscv64-unknown-elf- BL_SDK_BASE=<where you downloaded the sdk>/bouffalo_sdk/ make
+cd FPGA-Companion/src/bl616
 ```
 
-for a specific board select in between: m0sdock nano20k console60k mega60k mega138kpro primer25k
+To build all boards listed in `buildall.sh`, run:
+```bash
+./buildall.sh
+```
+
+To build only **M0S Dock**, use the existing clone:
+
+```bash
+cd "$HOME/Documents/FPGA-Companion/src/bl616"
+make clean
+CROSS_COMPILE="$HOME/xuantie-gcc-riscv-v2.6.1-linux-x86_64/bin/riscv64-unknown-elf-" BL_SDK_BASE="$HOME/bouffalo_sdk" make TANG_BOARD=m0sdock
+```
+
+for a specific board select in between: m0sdock nano20k nano20k_v3923 console60k mega60k mega138kpro primer25k console138k
 
 ```shell
-BL_SDK_BASE=<where you downloaded the sdk>/bouffalo_sdk/ make TANG_BOARD=console60k
+cd "$HOME/Documents/FPGA-Companion/src/bl616"
+make clean
+BL_SDK_BASE="$HOME/bouffalo_sdk" make TANG_BOARD=nano20k_v3923
 ```
 
-You can simplify the ```make``` a bit by setting in your bashrc BL_SDK_BASE and include the toolchain_gcc_t-head_linux in the search path.
+For future terminals, add the following exports to `~/.bashrc`:
 
 ```bash
-nano ./bashrc
-export BL_SDK_BASE=xyz 
-PATH=$PATH:/abc/toolchain_gcc_t-head_linux/bin
+export BL_SDK_BASE="$HOME/bouffalo_sdk"
+export PATH="$HOME/xuantie-gcc-riscv-v2.6.1-linux-x86_64/bin:$PATH"
 ```
+
+Reload the settings with `source ~/.bashrc`.
 
 A simple make or make CHIP=bl616 COMX=/dev/ttyACMxyz flash in your bl616 folder will do then.
 
-for onboard BL616 see: [Windows 11 Build AiO](#tang-onboard-bl616)
+for onboard BL616 see: [All in One Build](#all-in-one-build)
 
 ### Flashing the firmware
 
@@ -104,55 +175,60 @@ Once it shows up that way it can be flashed.
 If you have built the firmware yourself and have the SDK installed you can simply enter the following command:
 
 ```bash
-BL_SDK_BASE=<where you downloaded the sdk>/bouffalo_sdk/ make CHIP=bl616 COMX=/dev/ttyACM3 flash
+cd "$HOME/Documents/FPGA-Companion/src/bl616"
+BL_SDK_BASE="$HOME/bouffalo_sdk" make CHIP=bl616 COMX=/dev/ttyACM3 flash
 ```
 
 If you have downloaded the firmware from the [release page](https://github.com/MiSTle-Dev/FPGA-Companion/releases) you can use the graphical [BLFlashCube](https://github.com/CherryUSB/bouffalo_sdk/tree/master/tools/bflb_tools/bouffalo_flash_cube) tool using the ```fpga_companion_bl616_cfg.ini``` file.
 
 or alternatively for the .ini file including the companion fw and the fpga-companion:
 
-```shell
-BLFlashCube-ubuntu --interface=uart --baudrate=2000000 --port=/dev/ttyACMtbd --chipname=bl616 --cpu_id= --config buildall/flash_nano20k.ini
+```bash
+cd "$HOME/Documents/FPGA-Companion/src/bl616"
+"$HOME/bouffalo_sdk/tools/bflb_tools/bouffalo_flash_cube/BLFlashCommand-ubuntu" --interface=uart --baudrate=2000000 --port=/dev/ttyACM0 --chipname=bl616 --cpu_id= --config buildall/flash_nano20k.ini
 ```
 
 After successful download you need to unplug the device again and reinsert it *without* the BOOT button pressed to boot into the newly installed firmware.
 
 ## Compiling and uploading code for the BL616 (Windows 11)
 
+Download the Bouffalo toolchain:
+
+https://github.com/bouffalolab/toolchain/releases/tag/default
+
+Download xuantie-gcc-riscv-v2.6.1-windows-x86_64.7z into your home directory.
+
 Install [Git for Windows](https://gitforwindows.org)
 
-Install [cmake for Windows](https://cmake.org/download)
+Use **Command Prompt (`cmd.exe`)**, not PowerShell, for the Windows commands below.
+Open it using Win + R, then enter `cmd`.
 
-Install Bouffalo RISC-V MCU toolchain
 
-```shell
-Open Start Search, type “cmd” or Win + R and type “cmd” 
+clone the Bouffalo SDK:  
 
-cd %HOMEPATH%
-git clone https://github.com/bouffalolab/toolchain_gcc_t-head_windows.git
+```bat
+cd /d "%USERPROFILE%\Documents"
+git clone --recurse-submodules https://github.com/bouffalolab/bouffalo_sdk.git
 ```
 
-and the patched Bouffalo SDK with latest version common CherryUSB Stack:  
-
-```shell
-cd %HOMEPATH%
-git clone --recurse-submodules https://github.com/MiSTle-Dev/bouffalo_sdk.git
-```
+**Looks that recent SDK build still does not build/link even when enabling CONFIG_GCC_COMPILE_LTO, use Linux instead**
 
 Set Windows SDK Environment Variable:  
 
 ```text
 Open Start Search, type “env”, and select “Edit the system environment variables”.  
   
-BL_SDK_BASE=C:\Users\xyzuser\bouffalo_sdk
+BL_SDK_BASE=%USERPROFILE%\bouffalo_sdk
 ```
 
 Set Windows search PATH for Toolchain:  
 
-```shell
-C:\Users\xyzuser\toolchain_gcc_t-head_windows\bin
-C:\Users\xyzuser\bouffalo_sdk\tools\make
-C:\Users\xyzuser\bouffalo_sdk\tools\ninja
+```text
+%USERPROFILE%\xuantie-gcc-riscv-v2.6.1-windows-x86_64\bin
+%USERPROFILE%\bouffalo_sdk\tools\make
+%USERPROFILE%\bouffalo_sdk\tools\cmake
+%USERPROFILE%\bouffalo_sdk\tools\ninja
+%USERPROFILE%\bouffalo_sdk\tools\bflb_tools\bouffalo_flash_cube
 ```
 
 Close shell
@@ -166,43 +242,50 @@ check individually proper start of each single tool
 
 ```shell
 make -v
-cmake -version
+cmake --version
 ninja --help
 riscv64-unknown-elf-gcc -v
 ```
 
-Download FPGA companion repository
+Clone the FPGA-Companion repository into `%USERPROFILE%\Documents`:
 
-```shell
-cd %HOMEPATH%/Documents
+```bat
+cd /d "%USERPROFILE%\Documents"
 git clone --recurse-submodules https://github.com/MiSTle-Dev/FPGA-Companion.git
-cd FPGA-Companion
-git submodule init
-git submodule update
+cd FPGA-Companion\src\bl616
 ```
 
 Compile the firmware for **M0S Dock**  
 
-```shell
-cd %HOMEPATH%/Documents\FPGA-Companion\src\bl616
+```bat
+cd /d "%USERPROFILE%\Documents\FPGA-Companion\src\bl616"
 make clean
-make
+make TANG_BOARD=m0sdock
 ```
 
-for a specific board select in between: m0sdock nano20k console60k mega60k mega138kpro primer25k
+For a specific board, select one of: m0sdock nano20k nano20k_v3923 console60k console138k mega60k mega138kpro primer25k.
 
-```shell
-make TANG_BOARD=console60k
+```bat
+cd /d "%USERPROFILE%\Documents\FPGA-Companion\src\bl616"
+make clean
+make TANG_BOARD=nano20k_v3923
 ```
 
-## tang onboard bl616
+## All in One Build
 
 A build script creates for the several setups specific binaries and .ini files including the needed ``bl616_fpga_partner_`` firmware. The ``buildall`` folder will contain all needed files for a release. So far Nano20k, Console60k, Console138k, Primer25k, Mega138k Pro, Mega NEO Dock 60k apart from M0S Dock are supported.  
 Primer20k and TN9k are excluded as their BL702 doesn't support required USB host mode.
 
-```shell
+On Windows (Command Prompt):
+```bat
+cd /d "%USERPROFILE%\Documents\FPGA-Companion\src\bl616"
 buildall.bat
-buildall.sh
+```
+
+On Linux:
+```bash
+cd "$HOME/Documents/FPGA-Companion/src/bl616"
+./buildall.sh
 ```
 
 ### Flashing the firmware M0S Dock
@@ -218,17 +301,20 @@ Device Manager will open.
 Locate Ports (COM & LPT) in the list.  
 Check for the COM ports by expanding the same.  
 
-```shell
-make CHIP=bl616 COMX=COMabc  flash
+Replace `COM3` with the port shown in Device Manager:
+```bat
+cd /d "%USERPROFILE%\Documents\FPGA-Companion\src\bl616"
+make CHIP=bl616 COMX=COM3 flash
 ```
 
 If you have downloaded the firmware from the [release page](https://github.com/MiSTle-Dev/FPGA-Companion/releases) you can use the graphical [BLFlashCube](https://github.com/CherryUSB/bouffalo_sdk/tree/master/tools/bflb_tools/bouffalo_flash_cube) tool using the ```fpga_companion_bl616_cfg.ini``` file.
 
 or alternatively a shell based tool:
 
-```shell
-cd %HOMEPATH%/Documents\FPGA-Companion\src\bl616
-BLFlashCommand.exe --interface=uart --baudrate=2000000 --port=COM_tbd --chipname=bl616 --cpu_id= --config %HOMEPATH%/Documents\FPGA-Companion\src\bl616\buildall\flash_nano20k.ini
+For example, to flash the Nano20k image generated by the build script:
+```bat
+cd /d "%USERPROFILE%\Documents\FPGA-Companion\src\bl616"
+"%USERPROFILE%\bouffalo_sdk\tools\bflb_tools\bouffalo_flash_cube\BLFlashCommand.exe" --interface=uart --baudrate=2000000 --port=COM3 --chipname=bl616 --cpu_id= --config buildall\flash_nano20k.ini
 ```
 
 After successful download you need to unplug the device again and reinsert it *without* the BOOT button pressed to boot into the newly installed firmware.

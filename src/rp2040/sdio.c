@@ -24,8 +24,8 @@
 
 #include "../gowin.h"   // TODO remove gowin dependency
 
-#if MISTLE_BOARD != 4
-#error "Direct SDIO access only works for the Dev20k board"
+#if MISTLE_BOARD != 4 && MISTLE_BOARD != 6
+#error "Direct SDIO access only works for the Dev20k adn Dev25k boards"
 #endif
 
 #define SD_VERIFY_CRC   0
@@ -260,10 +260,16 @@ static bool sdio_init(void) {
   }
   
   // wait for sd card to become ready
+  int timeout = 65535;  
   do {
     sdio_cmd(512, 55, 0x00000000, 48);      // prepare ACMD
     r = sdio_cmd(256, 41, 0x40100000, 48);  // read OCR
-  } while(!(r & 0x80000000));    // check busy bit
+  } while(!(r & 0x80000000) && --timeout);  // check busy bit
+
+  if(!timeout) {
+    sdc_debugf("Card initialization timeout");
+    return false;
+  }
   
   // we only support sdhc cards
   if(!(r & 0x40000000)) {

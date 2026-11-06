@@ -2,7 +2,7 @@
   at_wifi.c
 
   background process sending and receiving data from FPGA "port" which
-  usually us serial/rs232 data. This is parsed to provice an hayes at
+  usually is serial/rs232 data. This is parsed to provide an hayes at
   command like interface to e.g. wifi
 */
 
@@ -169,6 +169,8 @@ static void port_line(char *command) {
 // Port implements an "AT" like interface to e.g. be used
 // to control a WiFi modem
 void at_wifi_port_byte(unsigned char byte) {
+  // the FPGA may deliver port bytes before at_wifi_init() created the queue
+  if(!rx_queue) return;
   xQueueSendToBack(rx_queue, &byte, ( TickType_t ) 10);
 }
 
@@ -270,6 +272,10 @@ static void at_wifi_task(__attribute__((unused)) void *parms) {
 
 void at_wifi_init(void) {
   debugf("AT WIFI init");
+
+#if defined(M0S_DOCK) || defined(TANG_CONSOLE60K) || defined(TANG_MEGA60K)
+  mcu_hw_wifi_auto_connect();
+#endif
 
   // start a thread to handle at/wifi io
   rx_queue = xQueueCreate(8, sizeof( unsigned char ) );

@@ -16,15 +16,23 @@
 #define MENU_EVENT_BACK          8
 #define MENU_EVENT_KEY_RELEASE   9
 
-#define MENU_EVENT_SHOW         10
-#define MENU_EVENT_HIDE         11
+#define MENU_EVENT_TOGGLE       10
 
 // The system menu may want to deal with
 // the USB mass storage once it's mounted
-#define MENU_EVENT_USB_MOUNTED  12
-#define MENU_EVENT_USB_UMOUNTED 13
+#define MENU_EVENT_USB_MOUNTED  11
+#define MENU_EVENT_USB_UMOUNTED 12
 
-#define MENU_EVENT_SYSTEM       14
+#define MENU_EVENT_SYSTEM       13
+
+#define MENU_EVENT_BLUETOOTH_CONNECTED  14
+#define MENU_EVENT_BLUETOOTH_DISCONNECTED  15
+#define MENU_EVENT_BLUETOOTH_SCAN  16
+#define MENU_EVENT_BLUETOOTH_PIN_CODE_REQUEST 17
+#define MENU_EVENT_NETWORK_GOT_IP       18
+#define MENU_EVENT_NETWORK_DISCONNECTED 19
+
+#define MENU_EVENT_KEY_LATIN1    256  // 256..511
 
 typedef struct menu_variable {
   char id;
@@ -36,11 +44,15 @@ extern TaskHandle_t menu_handle;
 
 void menu_init(void);
 menu_variable_t *menu_get_variables(void);
-void menu_set_value(unsigned char id, unsigned char value);
+const char *menu_cfgsel_save_name(const char *file);
+void menu_set_value(unsigned char id, int8_t value);
 void menu_do(int);
 void menu_notify(unsigned long msg);
+void menu_notify_ip(const char *ipaddr);
+void menu_notify_network_disconnected(void);
 void menu_joystick_state(unsigned char state);
 void menu_button_state(unsigned char state);
 void menu_run_current_image_action(void);
+void menu_draw_dialog(const char *title, const char *msg);
 
 #endif // MENU_H

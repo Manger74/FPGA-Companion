@@ -10,11 +10,17 @@
 #include "../mcu_hw.h"
 #include "../debug.h"
 
-#if MISTLE_BOARD != 2 && MISTLE_BOARD != 4 && MISTLE_BOARD != 5
-#error "USB JTAG is only available for the PiZero, Dev20k, MSP20k"
+#if MISTLE_BOARD != 2 && MISTLE_BOARD != 4 && MISTLE_BOARD != 5 && MISTLE_BOARD != 6 && MISTLE_BOARD != 7
+#error "USB JTAG is only available for the PiZero, Dev20k, MSP20k, MSP2_20k, Dev25k"
 #else
 #warning "Enabling USB JTAG bridge"
 #endif
+
+#ifdef PICO_RP2350
+#warning "Enabling PIO for JTAG on RP2350"
+#endif
+
+#include "pio_jtag.h"
 
 #if JTAG_CHANNELS == 1
 #warning "Implementing single channel USB JTAG."
@@ -115,6 +121,7 @@ struct jtag {
   uint8_t mode;  // 2=JTAG
   uint8_t latency_timer;
   TickType_t latency_timer_last_event;
+  uint16_t master_clock;
   
   // command buffer to assemble incoming commands and
   // which may be split over multiple usb transfers
@@ -149,6 +156,7 @@ void tud_mount_cb(void) {
     jtag_engine[i].rx_disabled = false;
     jtag_engine[i].reply_len = 0;
     jtag_engine[i].cmd_buf.len = 0;
+    jtag_engine[i].master_clock = 12;        // 12 MHz
   }
 }
 
@@ -291,10 +299,9 @@ static void cmd_parse(struct jtag *jtag) {
   case 0x86: {
     // send input state in a reply byte
     int divisor = jtag->cmd_buf.data.cmd.w;
-    int rate12 = 12000000 / ((1+divisor) * 2);
-    int rate60 = 60000000 / ((1+divisor) * 2);
-    usb_debugf("Set TCK/SK Divisor to %d = %d/%d khz",
-	       divisor, rate12/1000, rate60/1000);
+    int clk = jtag->master_clock * 1000000 / ((1+divisor) * 2);
+    usb_debugf("Set TCK/SK Divisor to %d -> %d khz", 2*(1+divisor), clk/1000);
+    mcu_hw_jtag_set_clock(clk);
   } break;
 
   case 0x87:
@@ -307,10 +314,12 @@ static void cmd_parse(struct jtag *jtag) {
 
   case 0x8a:
     usb_debugf("Disable div by 5 (60MHz master clock)");
+    jtag->master_clock = 60;
     break;
         
   case 0x8b:
     usb_debugf("Enable div by 5 (12MHz master clock)");
+    jtag->master_clock = 12;
     break;
 
     // gowin programmer uses this ...
@@ -506,9 +515,19 @@ static uint16_t cmd_shift_parse(struct jtag *jtag, uint8_t *buf, uint16_t len) {
 
 // https://github.com/MiSTle-Dev/PICO-MPSSE/blob/main/pico_mpsse/pico_mpsse.c
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
+#if 0  
+  uint8_t lbuf[bufsize]; // use a local buffer as jtag_send may want to reverse the byte order
+  uint8_t *lbuffer = lbuf;
+  memcpy(lbuffer, buffer, bufsize);
+#else
+  uint8_t lbuf[tud_vendor_available()];
+  uint8_t *lbuffer = lbuf;
+  bufsize = tud_vendor_read(lbuffer, sizeof(lbuf));
+#endif
+    
 #ifdef DEBUG_DATA_TRANSFER
-  usb_debugf("tud_vendor_rx_cb(%d, %p, %d)", itf, buffer, bufsize); 
-  hexdump(buffer, bufsize);
+  usb_debugf("tud_vendor_rx_cb(%d, %p, %ld)", itf, lbuffer, bufsize); 
+  hexdump(lbuffer, bufsize);
 #endif
   
   struct jtag *jtag = &jtag_engine[itf];
@@ -522,14 +541,14 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
       usb_debugf("Continue pending write %d of %d", bytes2shift, jtag->pending_writes);
 #endif
       
-      jtag_data((jtag->pending_write_cmd&8)?1:0, (uint8_t*)buffer,
+      jtag_data((jtag->pending_write_cmd&8)?1:0, (uint8_t*)lbuffer,
 		(jtag->pending_write_cmd & 0x20)?(jtag->reply_buffer + jtag->reply_len + 2):NULL,
 		(uint32_t)bytes2shift*8);
       if(jtag->pending_write_cmd & 0x20) jtag->reply_len += bytes2shift;
       
       jtag->pending_writes -= bytes2shift;      
       bufsize -= bytes2shift;
-      buffer += bytes2shift;
+      lbuffer += bytes2shift;
 
       // has all data been used up? Prepare for next reply
       if(!bufsize) {
@@ -542,7 +561,7 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
     while(bufsize) {
       // move next byte into command buffer
       // printf("BUF %d -> %02x to %d\n", bufsize, *buffer, jtag->cmd_buf.len);
-      jtag->cmd_buf.data.bytes[jtag->cmd_buf.len++] = *buffer++;
+      jtag->cmd_buf.data.bytes[jtag->cmd_buf.len++] = *lbuffer++;
       bufsize--;
       
       if(jtag->cmd_buf.len &&
@@ -550,8 +569,8 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const* buffer, uint32_t bufsize) {
 	if(jtag->cmd_buf.data.cmd.code & 0x80) {
 	  cmd_parse(jtag);
 	} else  {
-	  int skip = cmd_shift_parse(jtag, (uint8_t*)buffer, bufsize);
-	  buffer += skip;
+	  int skip = cmd_shift_parse(jtag, (uint8_t*)lbuffer, bufsize);
+	  lbuffer += skip;
 	  bufsize -= skip;
 	}
 	
@@ -583,11 +602,18 @@ void tud_vendor_tx_cb(uint8_t itf, __attribute__((unused)) uint32_t bufsize) {
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const* request) {
   bool dir_in = (request->bmRequestType_bit.direction == TUSB_DIR_IN) ? true : false; 
+  //  usb_debugf("tud_vendor_control_xfer_cb(if=0x%02x stage=%d req=0x%02x "
+  //	     "type=0x%02x dir=%s wValue=0x%04x wIndex=0x%04x wLength=%d)",
+  //	     request->wIndex, stage, request->bRequest, request->bmRequestType_bit.type,
+  //	     dir_in ? "IN" : "OUT", request->wValue, request->wIndex, request->wLength);
 
   if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR) {
     usb_debugf("Ignoring unexpected type 0x%02x", request->bmRequestType);
     return false;
   }
+
+  if(stage != CONTROL_STAGE_SETUP)
+    return true;
 
 #if JTAG_CHANNELS == 2
   struct jtag *jtag = NULL;
@@ -597,15 +623,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
   struct jtag *jtag = jtag_engine;
 #endif
 
-  if(stage != CONTROL_STAGE_SETUP)
-    return true;
-
   if(!dir_in) {
     switch(request->bRequest) {
       
     case 0x00:
       usb_debugf("RESET, #%d=%d", request->wIndex, request->wValue);
-      if(request->wValue == 2) send_status_and_data(jtag);
+      if(request->wValue == 2 && jtag) send_status_and_data(jtag);
       break;
 
     case 0x01:
@@ -638,13 +661,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
       
     case 0x09:
       usb_debugf("SET LATENCY TIMER, #%d=%d", request->wIndex, request->wValue);
-      jtag->latency_timer = request->wValue & 0xff;
+      if(jtag) jtag->latency_timer = request->wValue & 0xff;
       break;
       
     case 0x0b:
       usb_debugf("SET BITMODE, #%d=0x%02x", request->wIndex, request->wValue);
-      if(request->wIndex >= 1 && request->wIndex <= 2) {
-	struct jtag *jtag = &jtag_engine[request->wIndex-1];
+      if(jtag) {
 	jtag->mode = request->wValue>>8;
 	//  port_gpio_set_dir(jtag, pkt->wValue & 0xff);
       }
@@ -667,11 +689,6 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     tud_control_status(rhport, request);
     return true;
   } else {
-    //    usb_debugf("tud_vendor_control_xfer_cb(if=0x%02x stage=%d req=0x%02x "
-    //	       "type=0x%02x dir=%s wValue=0x%04x wIndex=0x%04x wLength=%d)",
-    //	       request->wIndex, stage, request->bRequest, request->bmRequestType_bit.type,
-    //	       dir_in ? "IN" : "OUT", request->wValue, request->wIndex, request->wLength);
-
     switch(request->bRequest) {
     case 0x05:
       usb_debugf("POLL MODEM STATUS");
@@ -679,9 +696,11 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
       break;
       
     case 0x0a:
-      usb_debugf("GET LATENCY TIMER = %d", jtag->latency_timer);
-      return tud_control_xfer(rhport, request, &(jtag->latency_timer), 1);
-
+      if(jtag) {
+	usb_debugf("GET LATENCY TIMER = %d", jtag->latency_timer);
+	return tud_control_xfer(rhport, request, &(jtag->latency_timer), 1);
+      } else
+	return false;
       break;
 
     case 0x90: // read eeprom      

@@ -1,13 +1,16 @@
-# MiSTeryNano FPGA Companion
+# MiSTle FPGA Companion
 
-The MiSTeryNano FPGA Companion implements support functions for FPGA
-based retro computing projects like [MiSTeryNano
-project](https://github.com/MiSTle-Dev/MiSTeryNano). While the FPGA
-typically implements the hardware of the retro machine itself the
-Companion uses a microcontroller to add support for modern peripherals
-like USB keyboard, mice and SD cards. It also implements an
-on-screen-display menu to allow the user to configure the retro
-machine.
+The MiSTle FPGA Companion implements support functions for FPGA-based retro
+computing projects like the [MiSTeryNano
+project](https://github.com/MiSTle-Dev/MiSTeryNano). While the FPGA typically
+implements the hardware of the retro machine itself, the Companion uses a
+microcontroller to support modern peripherals such as USB keyboards, mice,
+joysticks, and gamepads (SDL mapping), SD cards, and USB LAN dongles. It also
+provides an on-screen display (OSD) menu for configuring the retro machine. An
+FPGA core can also be loaded from a USB memory stick or SD card for DEV20K,
+DEV25K, and Console 60k/138k. A built-in FTP server allows files to be copied
+to the SD card. A Telnet server is also built in, allowing clients to monitor
+debug messages.
 
 The FPGA Companion replaces the MiSTeryNano firmware that was
 formerly part of the [MiSTeryNano
@@ -47,19 +50,19 @@ disadvantages.
   - Pros
     - Very powerful Risc-V CPU
     - USB 2.0 highspeed host support
-    - WiFi 6 support
-    - Bluetooth BLE 5.2 support
+    - Built-in WIFI6 BT BLE ZIGBEE THREAD MATTER support
+    - [CherryUSB](https://github.com/cherry-embedded/CherryUSB) stack
   - Cons
     - Limited SDK support
-      - USB needs manual update of the [CherryUSB](https://github.com/cherry-embedded/CherryUSB) stack
-      - No classic Bluetooth support
+    - Many Tang boards lack Wi-Fi and Bluetooth antennas; the M0S Dock is an exception
 
-### RP2040
+### RP2040 / RP2350
 
   - Pros
     - Powerful and well-supported SDK
     - Widely available and cheap
     - Fullspeed USB host support
+    - [TinyUSB](https://github.com/hathach/tinyusb) stack
   - Cons
     - No built-in bluetooth and WiFi support
       - Only available via seperate modules (e.g. on Pico(W))

@@ -87,7 +87,17 @@
 // #define configKERNEL_PROVIDED_STATIC_MEMORY     1
 #define configSUPPORT_STATIC_ALLOCATION         1
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   (128*1024)
+// TODO: use more ram on rp2350
+#ifdef ENABLE_BLUETOOTH
+// reserve a little more ram outside freertos for bluetooth
+#if PICO_RP2350
+#define configTOTAL_HEAP_SIZE                   (112*1024)
+#else
+#define configTOTAL_HEAP_SIZE                   (106*1024)
+#endif
+#else
+#define configTOTAL_HEAP_SIZE                   (112*1024)
+#endif
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 /* Hook function related definitions. */

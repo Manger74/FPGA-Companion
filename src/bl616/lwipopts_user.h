@@ -32,6 +32,14 @@
 #ifndef LWIP_HDR_LWIPOPTS_H__
 #define LWIP_HDR_LWIPOPTS_H__
 
+#define LWIP_DHCP_GET_NTP_SRV         1
+#define LWIP_DHCP_MAX_NTP_SERVERS     2
+#define SNTP_SERVER_DNS               1
+#define SNTP_GET_SERVERS_FROM_DHCP    1
+#define SNTP_SET_SYSTEM_TIME           sntp_set_system_time
+#define MEMP_NUM_SYS_TIMEOUT          (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 2)
+#define SNTP_DEBUG LWIP_DBG_ON
+
 #define LWIP_NETIF_API     1
 #define LWIP_DEBUG         1
 #define LWIP_STATS_DISPLAY 1
@@ -66,15 +74,15 @@
 
 #define PBUF_LINK_ENCAPSULATION_HLEN  388
 
-#define IP_REASS_MAX_PBUFS            (2 * CONFIG_MAC_RXQ_DEPTH - 2)
+#define MAC_TXQ_DEPTH                 32
+#define MAC_RXQ_DEPTH                 12
+
+#define IP_REASS_MAX_PBUFS            (2 * MAC_RXQ_DEPTH - 2)
 
 #define MEMP_NUM_NETBUF               32
 #define MEMP_NUM_NETCONN              16
 #define MEMP_NUM_UDP_PCB              16
 #define MEMP_NUM_REASSDATA            LWIP_MIN((IP_REASS_MAX_PBUFS), 5)
-
-#define MAC_TXQ_DEPTH                 CONFIG_MAC_TXQ_DEPTH
-#define MAC_RXQ_DEPTH                 CONFIG_MAC_RXQ_DEPTH
 
 #define TCP_MSS                       (1500 - 40)
 #define TCP_WND                       (2 * MAC_RXQ_DEPTH * TCP_MSS)
@@ -114,6 +122,7 @@
 #define LWIP_SOCKET_SET_ERRNO     1
 
 #define LWIP_DHCP                 1
+#define LWIP_SNTP                 1
 #define LWIP_DNS                  1
 #define LWIP_DNS_SERVER           0
 #define LWIP_IGMP                 0
@@ -124,10 +133,14 @@
 
 extern int *__errno(void);
 #define errno                         (*__errno())
-#define LWIP_NETIF_STATUS_CALLBACK    1
 #define LWIP_NETIF_API                1
-
+#define LWIP_NETIF_HOSTNAME           1
+#define LWIP_NETIF_STATUS_CALLBACK    1
+#define LWIP_NETIF_LINK_CALLBACK      1
 #define ETHARP_SUPPORT_STATIC_ENTRIES 1
+#define LWIP_IPV4                   1
+#define LWIP_TCP                    1
+#define LWIP_UDP                    1
 
 #define LWIP_SUPPORT_CUSTOM_PBUF      1
 #ifdef HIGH_PERFORMANCE_PBUF

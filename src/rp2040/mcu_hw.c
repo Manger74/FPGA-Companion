@@ -22,6 +22,7 @@
 #include "../config.h"
 #include "../spi.h"
 #include "../sysctrl.h"
+#include "../inifile.h"
 #include "../at_wifi.h"
 #include "../inifile.h"
 #include "../menu.h"
@@ -29,16 +30,45 @@
 
 #include "../mcu_hw.h"
 
+#ifdef ENABLE_BLUETOOTH
+#include "../bluetooth.h"
+#endif
+
 #ifndef MISTLE_BOARD
 #error "No MiSTle board type specified!"
 #endif
 
+#define DEFAULT_LED_MODE  1   // 0=blink, 1=on, 2=off
+
+// This is a custom SDL USB controller map entry for the
+// Data Frog PC07 pair of wireless SNES-like controllers.
+// This fixes the shoulder buttons.
+UsbGamepadMap data_frog_pc07 =
+  { "03000000100800000100000010010000", "DATA FROG PC07 Twin SNES Adapter",
+    0x0810, 0x0001, 0x0110,
+    2, 1, 3, 0,     // btn a, b, x, y
+    8, -1, 9,       // btn back (select), guide, start
+    4, 5,           // btn left shoulder, right shoulder
+    -1, -1,         // btn left stick, right stick
+    -1, -1, -1, -1, // dpad up, down, left, right
+    0,              // dpad hat
+    1, 2, 4, 8,     // dpad hat up, right, down, left
+    0, 1, 3, 2,     // axis lx, ly, rx, ry
+    0, 0, 0, 0,
+    -1, -1,
+    0, 0,
+    -1, -1,       // btn lt, rt
+    0, 0, 0, 0,
+    0, 0,
+    -1, -1, -1, -1,
+    0, 0, 0, 0,
+    0, 0, 0, 0
+  };
+    
 #if MISTLE_BOARD == 0
 #warning "Building for Raspberry Pi Pico or Pico-W"
-#define ENABLE_WIFI
 #elif MISTLE_BOARD == 1
 #warning "Building for Raspberry Pi Pico2 or Pico2-W"
-#define ENABLE_WIFI
 #elif MISTLE_BOARD == 2
 #warning "Building for Waveshare RP2040-Zero"
 #include "../jtag.h"
@@ -50,13 +80,20 @@
 #include "./sdio.h"
 #elif MISTLE_BOARD == 5
 #warning "Building for MiSTeryShieldPicoTN20k"
-#define ENABLE_WIFI
 #include "../jtag.h"
+#elif MISTLE_BOARD == 6
+#warning "Building for GW3A/GW5A DEV 25K"
+#include "../jtag.h"
+#include "pio_jtag.h"
+#elif MISTLE_BOARD == 7
+#warning "Building for MiSTeryShieldPico2_TN20k"
+#include "../jtag.h"
+#include "pio_jtag.h"
 #else
 #error "Not a supported MiSTle board!"
 #endif
 
-#if MISTLE_BOARD == 4
+#if MISTLE_BOARD == 4 || MISTLE_BOARD == 6
 // FPGA JTAG pins
 #define PIN_JTAG_TDI  12   // pin 15, gpio 12
 #define PIN_JTAG_TMS  13   // pin 16, gpio 13
@@ -67,13 +104,12 @@
 #define PIN_nCFG      21   // pin 32, PIO21
 #define PIN_MODE0     23   // pin 35, PIO23
 #define PIN_MODE1     24   /* pin 36, PIO24 */
-#elif MISTLE_BOARD == 5
+#elif MISTLE_BOARD == 5 || MISTLE_BOARD == 7
 // FPGA JTAG pins
 #define PIN_JTAG_TDI  12   // pin 15, gpio 12
 #define PIN_JTAG_TMS  13   // pin 16, gpio 13
 #define PIN_JTAG_TDO  14   // pin 17, gpio 14
 #define PIN_JTAG_TCK  15   // pin 18, gpio 15
-
 #endif
 
 #if MISTLE_BOARD == 2
@@ -114,6 +150,15 @@
 #warning "WiFi support disabled"
 #endif
 
+#ifdef ENABLE_BLUETOOTH
+#ifndef ENABLE_WIFI
+#error "Bluetooth needs WiFi to be enabled!"
+#endif
+#warning "Bluetooth support enabled"
+#else
+#warning "Bluetooth support disabled"
+#endif
+
 #ifdef WS2812_PIN
 #include "ws2812.pio.h"
 #endif
@@ -131,7 +176,7 @@
 #error "Cannot determine TinyUSB version!"
 #endif
 
-#if TUSB_VERSION_NUMBER < 1700
+#if TUSB_VERSION_NUMBER < 2000
 #error "Please update your TinyUSB installation!"
 #endif
 
@@ -140,11 +185,13 @@
 #error "WS2812B and PIO USB cannot be used simultaneously!"
 #endif
 
+#define MAX_JS_PER_IFACE  2
+
 static struct {
   uint8_t dev_addr;
   uint8_t instance;
-  hid_state_t state;
-  hid_report_t rep;
+  hid_state_t state[MAX_JS_PER_IFACE];
+  hid_report_t rep[MAX_JS_PER_IFACE];
 } hid_device[MAX_HID_DEVICES];
 
 static struct {
@@ -152,9 +199,13 @@ static struct {
   uint8_t instance;
   uint8_t js_index;
   uint8_t state;
-  int16_t state_x;
-  int16_t state_y;
+  uint8_t state_x;
+  uint8_t state_y;
   uint8_t state_btn_extra;
+
+  UsbGamepadMap *map;
+  bool map_found;
+  bool map_checked;
 } xbox_state[MAX_XBOX_DEVICES];
 
 CFG_TUH_MEM_SECTION struct {
@@ -176,7 +227,7 @@ static void pio_usb_task(__attribute__((unused)) void *parms) {
   while(1) {
     for(int i=0;i<100;i++) {
       tuh_task();
-#if (MISTLE_BOARD == 2) || (MISTLE_BOARD == 4) || (MISTLE_BOARD == 5)
+#if (MISTLE_BOARD == 2) || (MISTLE_BOARD == 4) || (MISTLE_BOARD == 5) || (MISTLE_BOARD == 6) || (MISTLE_BOARD == 7)
       tud_task();
       usb_jtag_poll();
 #endif
@@ -197,8 +248,8 @@ uint8_t byteScaleAnalog(int16_t xbox_val)
 bool mcu_hw_hid_present(void) {
   for(int idx=0;idx<MAX_HID_DEVICES;idx++) {
     if(hid_device[idx].dev_addr != 0xff) {    
-      if(hid_device[idx].rep.type == REPORT_TYPE_KEYBOARD) return true;
-      if(hid_device[idx].rep.type == REPORT_TYPE_JOYSTICK) return true;
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_KEYBOARD) return true;
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_JOYSTICK) return true;
     }
   }
     
@@ -224,13 +275,13 @@ static void usb_check_devices(void) {
   for(int idx=0;idx<MAX_HID_DEVICES;idx++) {
     if(hid_device[idx].dev_addr != 0xff) {    
 #ifdef LED_MOUSE_PIN
-      if(hid_device[idx].rep.type == REPORT_TYPE_MOUSE)    mice++;
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_MOUSE)    mice++;
 #endif
 #ifdef LED_KEYBOARD_PIN
-      if(hid_device[idx].rep.type == REPORT_TYPE_KEYBOARD) keyboards++;
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_KEYBOARD) keyboards++;
 #endif
 #ifdef LED_JOYSTICK_PIN
-      if(hid_device[idx].rep.type == REPORT_TYPE_JOYSTICK) joysticks++;
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_JOYSTICK) joysticks++;
 #endif
     }
   }
@@ -259,36 +310,138 @@ static void usb_check_devices(void) {
   menu_notify(MENU_EVENT_NONE);
 }
 
+//--------------------------------------------------------------------+
+// String Descriptor Helper
+//--------------------------------------------------------------------+
+static void _convert_utf16le_to_utf8(const uint16_t* utf16, size_t utf16_len, uint8_t* utf8, size_t utf8_len) {
+  // TODO: Check for runover.
+  (void) utf8_len;
+  // Get the UTF-16 length out of the data itself.
+
+  for (size_t i = 0; i < utf16_len; i++) {
+    uint16_t chr = utf16[i];
+    if (chr < 0x80) {
+      *utf8++ = chr & 0xffu;
+    } else if (chr < 0x800) {
+      *utf8++ = (uint8_t) (0xC0 | (chr >> 6 & 0x1F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 0 & 0x3F));
+    } else {
+      // TODO: Verify surrogate.
+      *utf8++ = (uint8_t) (0xE0 | (chr >> 12 & 0x0F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 6 & 0x3F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 0 & 0x3F));
+    }
+    // TODO: Handle UTF-16 code points that take two entries.
+  }
+}
+
+// Count how many bytes a utf-16-le encoded string will take in utf-8.
+static int _count_utf8_bytes(const uint16_t* buf, size_t len) {
+  size_t total_bytes = 0;
+  for (size_t i = 0; i < len; i++) {
+    uint16_t chr = buf[i];
+    if (chr < 0x80) {
+      total_bytes += 1;
+    } else if (chr < 0x800) {
+      total_bytes += 2;
+    } else {
+      total_bytes += 3;
+    }
+    // TODO: Handle UTF-16 code points that take two entries.
+  }
+  return (int) total_bytes;
+}
+
+static void print_utf16(uint16_t* temp_buf, size_t buf_len) {
+  if ((temp_buf[0] & 0xff) == 0) return;  // empty
+  size_t utf16_len = ((temp_buf[0] & 0xff) - 2) / sizeof(uint16_t);
+  size_t utf8_len = (size_t) _count_utf8_bytes(temp_buf + 1, utf16_len);
+  _convert_utf16le_to_utf8(temp_buf + 1, utf16_len, (uint8_t*) temp_buf, sizeof(uint16_t) * buf_len);
+  ((uint8_t*) temp_buf)[utf8_len] = '\0';
+
+  usb_debugf("%s", (char*) temp_buf);
+}
+
 // Lookup if there is a map for current gamepad
-const UsbGamepadMap *find_usb_gamepad_map(uint16_t vid,
+static const UsbGamepadMap *find_usb_gamepad_map(uint16_t vid,
                                           uint16_t pid,
                                           int version_optional)
 {
-  const UsbGamepadMap *fallback = NULL;
+  /*
+   * Selection order:
+   *   1. exact VID/PID/bcdDevice match,
+   *   2. VID/PID entry with version == 0 (generic/default SDL entry),
+   *   3. first VID/PID entry as a deterministic last-resort fallback.
+   *
+   * The old code only populated fallback when version_optional < 0.  The
+   * normal caller always passes bcdDevice, so a missing exact version could
+   * never fall back and the SDL map was silently disabled.
+   */
+  const UsbGamepadMap *first_vid_pid = NULL;
+  const UsbGamepadMap *version_zero = NULL;
 
   for (size_t i = 0; i < kUsbGamepadMapsCount; i++)
   {
     const UsbGamepadMap *m = &kUsbGamepadMaps[i];
 
-    if (m->vid == vid && m->pid == pid)
-    {
-      if (version_optional >= 0)
-      {
-        if (m->version == (uint16_t)version_optional)
-        {
-          return m;
-        }
-      }
-      else
-      {
-        if (!fallback)
-          fallback = m;
-      }
-    }
+    if (m->vid != vid || m->pid != pid)
+      continue;
+
+    if (!first_vid_pid)
+      first_vid_pid = m;
+
+    if (!version_zero && m->version == 0)
+      version_zero = m;
+
+    if (version_optional >= 0 &&
+        m->version == (uint16_t)version_optional)
+      return m;
   }
 
-  return fallback;
+  if (version_zero)
+    return version_zero;
+
+  return first_vid_pid;
 }
+
+static void show_map(const UsbGamepadMap *map) {
+  char str0[8], str1[8], str2[8], str3[8];
+  char str4[16], str5[16], str6[16], str7[16];
+      
+  if(map->btn_a>=0)    sprintf(str0, " A=%d", map->btn_a); else str0[0] = '\0';      
+  if(map->btn_b>=0)    sprintf(str1, " B=%d", map->btn_b); else str1[0] = '\0';
+  if(map->btn_x>=0)    sprintf(str2, " X=%d", map->btn_x); else str2[0] = '\0';
+  if(map->btn_y>=0)    sprintf(str3, " Y=%d", map->btn_y); else str3[0] = '\0';            
+  if(map->btn_back>=0) sprintf(str4, " SEL=%d", map->btn_back); else str4[0] = '\0';            
+  if(map->btn_start>=0) sprintf(str5, " STA=%d", map->btn_start); else str5[0] = '\0';            
+  if(map->btn_leftshoulder>=0) sprintf(str6, " LTRG=%d", map->btn_leftshoulder); else str6[0] = '\0';
+  if(map->btn_rightshoulder>=0) sprintf(str7, " RTRG=%d", map->btn_rightshoulder); else str7[0] = '\0';
+  usb_debugf("  buttons:%s%s%s%s%s%s%s%s", str0, str1, str2, str3, str4, str5, str6, str7);
+
+  if(map->axis_lx>=0 || map->axis_ly>=0) {
+    if(map->axis_lx>=0) sprintf(str0, " LX=%d", map->axis_lx); else str0[0] = '\0';      
+    if(map->axis_ly>=0) sprintf(str1, " LY=%d", map->axis_ly); else str1[0] = '\0';      
+    usb_debugf("  analogue axes:%s%s", str0, str1);
+  }
+  
+  if(map->dpad_axis_up>=0 || map->dpad_axis_down>=0 ||
+     map->dpad_axis_left>=0 || map->dpad_axis_right >= 0) {
+    
+    if(map->dpad_axis_up>=0)
+      sprintf(str0, " U=%d", map->dpad_axis_up); else str0[0] = '\0';      
+    if(map->dpad_axis_down>=0)
+      sprintf(str1, " D=%d", map->dpad_axis_down); else str1[0] = '\0';      
+    if(map->dpad_axis_left>=0)
+      sprintf(str2, " L=%d", map->dpad_axis_left); else str2[0] = '\0';      
+    if(map->dpad_axis_right>=0)
+      sprintf(str3, " R=%d", map->dpad_axis_right); else str3[0] = '\0';      
+    
+    usb_debugf("  dpad axes:%s%s%s%s", str0, str1, str2, str3);
+  }
+}
+  
+// English
+#define LANGUAGE_ID 0x0409
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
   // Interface protocol (hid_interface_protocol_enum_t)
@@ -297,23 +450,21 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
   uint16_t vid, pid;
   tuh_vid_pid_get(dev_addr, &vid, &pid);
-	
-	// check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268)
-   if (vid == 0x054c && pid == 0x0268) {
-	  	static uint8_t const magic_init[] = { 0x42, 0x0c, 0x00, 0x00 };
-       // We send a Set_Report (Feature) to activate the controller
-       tuh_hid_set_report(dev_addr, instance, 0xf4, HID_REPORT_TYPE_FEATURE, (void*)magic_init, sizeof(magic_init));
-       printf("PS3-Mode Joystick activated!\n");
-	}
-  usb_debugf("[%04x:%04x][%u] HID Interface%u, Protocol = %s",
-	     vid, pid, dev_addr, instance, protocol_str[itf_protocol]);
+  
+  // check for Sony PS3 / Speedlink Competition Pro V3 (054c:0268)
+  if (vid == 0x054c && pid == 0x0268) {
+    static uint8_t const magic_init[] = { 0x42, 0x0c, 0x00, 0x00 };
+    // We send a Set_Report (Feature) to activate the controller
+    tuh_hid_set_report(dev_addr, instance, 0xf4, HID_REPORT_TYPE_FEATURE, (void*)magic_init, sizeof(magic_init));
+    usb_debugf("PS3-Mode Joystick activated!\n");
+   }
 
   uint8_t xfer_result = tuh_descriptor_get_device_sync(dev_addr, &desc.device, 18);
   if (XFER_RESULT_SUCCESS != xfer_result) {
     usb_debugf("Failed to get device descriptor");
   }
-  usb_debugf("Device %u: ID %04x:%04x SN ", dev_addr, desc.device.idVendor, desc.device.idProduct);
 
+  usb_debugf("ID[%04x:%04x] [%u] HID Interface%u, Protocol = %s", desc.device.idVendor, desc.device.idProduct, dev_addr, instance, protocol_str[itf_protocol]);
   usb_debugf("Device Descriptor:");
   usb_debugf("  bLength             %u", desc.device.bLength);
   usb_debugf("  bDescriptorType     %u", desc.device.bDescriptorType);
@@ -326,42 +477,105 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
   usb_debugf("  idProduct           0x%04x", desc.device.idProduct);
   usb_debugf("  bcdDevice           %04x", desc.device.bcdDevice);
 
+  xfer_result = XFER_RESULT_FAILED;
+  if (desc.device.iSerialNumber != 0) {
+    xfer_result = tuh_descriptor_get_serial_string_sync(dev_addr, LANGUAGE_ID, desc.serial, sizeof(desc.serial));
+  }
+  if (XFER_RESULT_SUCCESS != xfer_result) {
+    uint16_t* serial = (uint16_t*)(uintptr_t) desc.serial;
+
+    serial[0] = (uint16_t)((TUSB_DESC_STRING << 8) | (2 * 1 + 2));
+    serial[1] = '0'; // simply 0
+    serial[2] = 0;
+  }
+  print_utf16((uint16_t*)(uintptr_t) desc.serial, sizeof(desc.serial)/2);
+
+  usb_debugf("  iManufacturer       %u     ", desc.device.iManufacturer);
+  if (desc.device.iManufacturer != 0) {
+    xfer_result = tuh_descriptor_get_manufacturer_string_sync(dev_addr, LANGUAGE_ID, desc.buf, sizeof(desc.buf));
+    if (XFER_RESULT_SUCCESS == xfer_result) {
+      print_utf16((uint16_t*)(uintptr_t) desc.buf, sizeof(desc.buf)/2);
+    }
+  }
+
+  usb_debugf("  iProduct            %u     ", desc.device.iProduct);
+  if (desc.device.iProduct != 0) {
+    xfer_result = tuh_descriptor_get_product_string_sync(dev_addr, LANGUAGE_ID, desc.buf, sizeof(desc.buf));
+    if (XFER_RESULT_SUCCESS == xfer_result) {
+      print_utf16((uint16_t*)(uintptr_t) desc.buf, sizeof(desc.buf)/2);
+    }
+  }
+  usb_debugf("  iSerialNumber       %u     ", desc.device.iSerialNumber);
+  usb_debugf("%s", (char*)desc.serial); // serial is already to UTF-8
+  usb_debugf("  bNumConfigurations  %u", desc.device.bNumConfigurations);
+
   // search for a free hid entry
   int idx;
   for(idx=0;idx<MAX_HID_DEVICES && (hid_device[idx].dev_addr != 0xff);idx++);
   if(idx != MAX_HID_DEVICES) {
     usb_debugf("Using HID entry %d", idx);
-    
-    if(parse_report_descriptor(desc_report, desc_len, &hid_device[idx].rep, NULL)) {
+
+    // Some device return broken hid descriptor reports. Just like the Linux
+    // kernel we replace these.
+    fix_report_descriptor(desc.device.idVendor, desc.device.idProduct, desc.device.bcdDevice, desc_report, desc_len);
+
+    uint16_t rbytes = 0;
+    if(parse_report_descriptor(desc_report, desc_len, &hid_device[idx].rep[0], &rbytes)) {
       hid_device[idx].dev_addr = dev_addr;
       hid_device[idx].instance = instance;
-      if(hid_device[idx].rep.type == REPORT_TYPE_JOYSTICK)
-	      hid_device[idx].state.joystick.js_index = hid_allocate_joystick();
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_JOYSTICK) {
+	// mark all js_index fields as unused
+	for(int i=0;i<MAX_JS_PER_IFACE;i++)
+	  hid_device[idx].state[i].joystick.js_index = NO_JOYSTICK;
+
+	// use first entry
+	hid_device[idx].state[0].joystick.js_index = hid_allocate_joystick();
+
+	// Check if there's significant unused data in the report desciptor.
+	// This likely means that there's annother report to be parsed.
+	if(desc_len - rbytes > 0) {
+	  usb_debugf("Trying to parse remaining %d bytes", desc_len - rbytes);
+	      
+	  desc_report += rbytes;
+	  desc_len -= rbytes;
+	  if(parse_report_descriptor(desc_report, desc_len, &hid_device[idx].rep[1], &rbytes)) {
+	    if(hid_device[idx].rep[1].type == REPORT_TYPE_JOYSTICK) {
+	      usb_debugf("Found second joystick report decriptor");
+	      hid_device[idx].state[1].joystick.js_index = hid_allocate_joystick();	      
+	    }
+	  }
+	}
+      }      
     } else
       usb_debugf("Ignoring device");
   } else
     usb_debugf("Error, no more free HID entries");
-  
-  const UsbGamepadMap *map;
-  if(hid_device[idx].rep.type == REPORT_TYPE_JOYSTICK)
-  {
-    // lookup for VID/PID/Version
-    map = find_usb_gamepad_map(desc.device.idVendor, desc.device.idProduct, desc.device.bcdDevice);
 
-    if (map)
-    {
-      usb_debugf("Found gamepad map: %s (VID=%04x PID=%04x VER=%04x)",
-                 map->name, map->vid, map->pid, map->version);
-      hid_device[idx].rep.map = map;
-      hid_device[idx].rep.map_found = 1;
-      hid_device[idx].rep.map_checked = 1;
-    }
-    else
-    {
-      usb_debugf("No map for VID=%04x PID=%04x, VERSION=%04x",desc.device.idVendor, desc.device.idProduct, desc.device.bcdDevice);
-        hid_device[idx].rep.map = NULL;
-        hid_device[idx].rep.map_found = 0;
-        hid_device[idx].rep.map_checked = 1;
+  const UsbGamepadMap *map;
+  for(int i=0;i<MAX_JS_PER_IFACE;i++) {
+    if(hid_device[idx].rep[i].type == REPORT_TYPE_JOYSTICK) {
+      // lookup for VID/PID/Version
+      map = find_usb_gamepad_map(desc.device.idVendor, desc.device.idProduct, desc.device.bcdDevice);
+      
+      if (map) {
+	// check of this is a data frog pc07 and force our custom map then
+	if(hid_device[idx].rep[1].type == REPORT_TYPE_JOYSTICK && map->vid == 0x0810 && map->pid == 0x0001)
+	  map = &data_frog_pc07;
+
+	usb_debugf("Found gamepad map: %s (VID=%04x PID=%04x VER=%04x)",
+		   map->name, map->vid, map->pid, map->version);
+	
+	show_map(map);
+	
+	hid_device[idx].rep[i].map = map;
+	hid_device[idx].rep[i].map_found = 1;
+	hid_device[idx].rep[i].map_checked = 1;
+      } else {
+	usb_debugf("No map for VID=%04x PID=%04x, VERSION=%04x",desc.device.idVendor, desc.device.idProduct, desc.device.bcdDevice);
+	hid_device[idx].rep[i].map = NULL;
+	hid_device[idx].rep[i].map_found = 0;
+	hid_device[idx].rep[i].map_checked = 1;
+      }
     }
   }
 
@@ -381,8 +595,11 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if(hid_device[idx].dev_addr == dev_addr && hid_device[idx].instance == instance) {
       usb_debugf("releasing %d", idx);
       hid_device[idx].dev_addr = 0xff;
-      if(hid_device[idx].rep.type == REPORT_TYPE_JOYSTICK)
-	hid_release_joystick(hid_device[idx].state.joystick.js_index);
+      if(hid_device[idx].rep[0].type == REPORT_TYPE_JOYSTICK) {
+	for(int i=0;i<MAX_JS_PER_IFACE;i++)
+	  if(hid_device[idx].state[0].joystick.js_index != NO_JOYSTICK)	
+	    hid_release_joystick(hid_device[idx].state[i].joystick.js_index);
+      }
     }
   }
   usb_check_devices();
@@ -393,8 +610,25 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
   // find matching hid report
   for(int idx=0;idx<MAX_HID_DEVICES;idx++)
-    if(hid_device[idx].dev_addr == dev_addr && hid_device[idx].instance == instance)
-      hid_parse(&hid_device[idx].rep, &hid_device[idx].state, report, len);
+    if(hid_device[idx].dev_addr == dev_addr && hid_device[idx].instance == instance) {
+      const hid_report_t *report_desc = &hid_device[idx].rep[0];
+      // if there's no report id at all, then just use the first entry as these are
+      // indistinguishable without report id
+      if(!report_desc->report_id_present)      
+	hid_parse(report_desc, &hid_device[idx].state[0], report, len);
+      else {
+	// there is a report id, so choose the right report descriptor for the
+	// hid layer to parse against
+	for(int i=0;i<MAX_JS_PER_IFACE;i++) {
+	  const hid_report_t *report_desc = &hid_device[idx].rep[i];	
+	  if(report_desc->report_id_present && report[0] == report_desc->report_id) {
+	    //usb_debugf("parsing report %d, id %d", i, report[0]);
+	    //hexdump(report, len);
+	    hid_parse(report_desc, &hid_device[idx].state[i], report, len);
+	  }
+	}
+      }
+    }
   
   // continue to request to receive report
   if ( report && !tuh_hid_receive_report(dev_addr, instance) )
@@ -455,6 +689,7 @@ void mcu_hw_spi_init(void) {
   // set handler but not enable yet as the main task may not be ready
   gpio_init(SPI_IRQ_PIN);
   gpio_set_dir(SPI_IRQ_PIN, GPIO_IN);
+  gpio_pull_up(SPI_IRQ_PIN);
   gpio_add_raw_irq_handler(SPI_IRQ_PIN, irq_handler);  
 }
 
@@ -483,25 +718,367 @@ void mcu_hw_spi_end() {
 }
 
 unsigned char mcu_hw_spi_tx_u08(unsigned char b) {
-  unsigned char retval;
-  spi_write_read_blocking(SPI_BUS, &b, &retval, 1);
+  unsigned char retval;  spi_write_read_blocking(SPI_BUS, &b, &retval, 1);
   return retval;
 }
+
+/* ======================================================================= */
+/* ======                   custom usb host drivers              ========= */
+/* ======================================================================= */
+
+#include "xinput_host.h"
+#include "asix_host.h"
+
+usbh_class_driver_t const* usbh_app_driver_get_cb(uint8_t* driver_count){
+  static usbh_class_driver_t drivers[2];
+
+  *driver_count = 2;
+  memcpy(drivers+0, &usbh_xinput_driver, sizeof(usbh_class_driver_t));
+  memcpy(drivers+1, &usbh_asix_driver, sizeof(usbh_class_driver_t));
+
+  return drivers;
+}
+
+// the network connection state
+#define NETWORK_STATUS_UNINITIALIZED        (0)
+#define NETWORK_STATUS_TCPIP_INIT         (1<<0) // lwip has been initialized
+#define NETWORK_STATUS_WIFI               (1<<1) // current setup is wifi based
+#define NETWORK_STATUS_UP                 (1<<2) // wifi connected or ethernet up
+#define NETWORK_STATUS_HAS_ADDR           (1<<3) // IP address is valid
+#define NETWORK_STATUS_SNTP_STARTED       (1<<4) // sntp app is running
+#define NETWORK_STATUS_TCP_CONNECTED      (1<<5) // the at wifi tcp connection is established
+#define NETWORK_STATUS_WIFI_AUTO          (1<<6) // wifi started from config file (no serial at-wifi IO)
+
+static uint8_t network_status = NETWORK_STATUS_UNINITIALIZED;
+static bool asix_unmount_in_progress = false;
+
+/* ======================================================================= */
+/* ======                   ASIX ethernet                        ========= */
+/* ======================================================================= */
+
+#if CFG_TUH_CDC 
+#define ENABLE_PPP
+#endif
+
+// LWIP network interface
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
+#include "lwip/dhcp.h"
+#include "lwip/apps/sntp.h"
+
+static err_t netif_asix_output(struct netif *netif, struct pbuf *p) {
+  if(network_status == NETWORK_STATUS_UNINITIALIZED) return ERR_OK;
+  
+  tuh_asix_transmit(netif, p->payload, p->tot_len);
+  return ERR_OK;
+}
+
+static err_t netif_asix_low_init(struct netif *netif) {
+  netif->linkoutput = netif_asix_output;
+  netif->output     = etharp_output;
+  netif->mtu        = 1500; 
+  netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
+
+  return ERR_OK;
+}
+
+static void netif_link_callback(struct netif *netif) {
+  usb_debugf("netif link status changed %s", netif_is_link_up(netif) ? "up" : "down");
+  if(netif_is_link_up(netif)) {
+    network_status |= NETWORK_STATUS_UP;
+
+    // If status callback was missed/raced, still surface IP once link is up.
+    if(!ip4_addr_isany_val(*netif_ip4_addr(netif))) {
+      if(!(network_status & NETWORK_STATUS_HAS_ADDR)) {
+        usb_debugf("ASIX: link up with existing ip address");
+        menu_notify_ip(ip4addr_ntoa(netif_ip4_addr(netif)));
+      }
+      network_status |= NETWORK_STATUS_HAS_ADDR;
+    }
+  } else {
+    network_status &= ~NETWORK_STATUS_UP;
+    network_status &= ~NETWORK_STATUS_HAS_ADDR;
+    if(!asix_unmount_in_progress)
+      menu_notify_network_disconnected();
+  }
+}
+
+#define SNTP_FALLBACK_SERVER "pool.ntp.org"
+
+static void ntp_setup(struct netif *netif) {  
+  if(!(network_status & NETWORK_STATUS_SNTP_STARTED)) {
+    sntp_init();
+    network_status |= NETWORK_STATUS_SNTP_STARTED;
+  }
+	
+  // set ntp server from config if specified there
+  if(inifile_config_has("ntp", "ip")) {
+    for(int i=0;i<inifile_config_num_values("ntp", "ip");i++) {
+      ip_addr_t sa;
+      ip_addr_set_ip4_u32(&sa, htonl(inifile_config_get_ip_n("ntp", "ip", 0, i)));
+      sntp_setserver(i, &sa);
+    }
+  }
+
+  // only request ntp server via dhcp if it has not been set explicitely
+  // and if the interface is ppp as that cannot use dhcp
+  if(!netif || netif->name[0] != 'p' || netif->name[1] != 'p') 
+    sntp_servermode_dhcp(!inifile_config_has("ntp", "ip"));
+
+  // neither config.ini nor DHCP named a server: use the public pool. A server
+  // from DHCP later replaces it.
+  if(ip_addr_isany(sntp_getserver(0)) && sntp_getservername(0) == NULL)
+    sntp_setservername(0, SNTP_FALLBACK_SERVER);
+}
+
+// this is actually called by axis _and_ the wifi
+static void netif_status_callback(struct netif *netif) {
+  usb_debugf("netif status changed %s", ip4addr_ntoa(netif_ip4_addr(netif)));
+
+  // check if we got a valid IP (not ANY, which is 0.0.0.0)
+  if(!ip4_addr_isany_val(*netif_ip4_addr(netif))) {
+    if(!(network_status & NETWORK_STATUS_HAS_ADDR)) {
+      // just got an ip address, start services
+      usb_debugf("just got an ip address");
+      menu_notify_ip(ip4addr_ntoa(netif_ip4_addr(netif)));
+
+      // display what sntp server is actually set (via DHCP)
+      usb_debugf("SNTP server 0 is %s", ip4addr_ntoa(sntp_getserver(0)));
+      ntp_setup(NULL);  // re-setup as dhcp may have been overwritten the ntp address
+    }
+    
+    network_status |=  NETWORK_STATUS_HAS_ADDR;
+  } else {
+    network_status &= ~NETWORK_STATUS_HAS_ADDR;
+    if(!asix_unmount_in_progress)
+      menu_notify_network_disconnected();
+  }
+}
+  
+// re-use parts of the existing PICO/WIFI integration
+#include "pico/async_context_freertos.h"
+#include "pico/lwip_freertos.h"
+#include "pico/cyw43_arch.h"
+
+/* Number of seconds between 1970 and Feb 7, 2036 06:28:16 UTC (epoch 1) */
+#define DIFF_SEC_1970_2036          ((u32_t)2085978496L)
+
+void sntp_set_system_time(u32_t sec) {
+  debugf("%s(%lu)", __FUNCTION__, sec);
+
+  time_t ut = sec + 3600 * inifile_config_get_int("ntp", "timezone", 0);
+  struct tm* timeinfo = gmtime(&ut);
+
+  // time is UTC ...
+  debugf(" YEAR:     %u", 1900 + timeinfo->tm_year);
+  debugf(" MONTH:    %u", 1 + timeinfo->tm_mon);
+  debugf(" DAY:      %u", timeinfo->tm_mday);
+  debugf(" WEEK DAY: %u", timeinfo->tm_wday);
+  debugf(" HOUR:     %u", timeinfo->tm_hour);
+  debugf(" MINUTE:   %u", timeinfo->tm_min);
+  debugf(" SECOND:   %u", timeinfo->tm_sec);
+  debugf(" DST:      %s", timeinfo->tm_isdst?"true":"false");
+
+  // send time into core
+  sys_set_time(SYS_TIME_FLAGS_NTP | ( timeinfo->tm_isdst?SYS_TIME_FLAGS_DST:0),
+	       timeinfo->tm_year, timeinfo->tm_mon, timeinfo->tm_mday + (timeinfo->tm_wday << 5),
+	       timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+}
+
+// set the name server of a static network config if config.ini names one
+#include "lwip/dns.h"
+static void netif_set_static_dns(void) {
+  if(!inifile_config_has("network", "dns")) return;
+  ip_addr_t dns;
+  ip_addr_set_ip4_u32(&dns, htonl(inifile_config_get_ip("network", "dns", 0)));
+  dns_setserver(0, &dns);
+}
+
+static void netif_up(struct netif *netif) {
+  usb_debugf("netif_up(%c%c)", netif->name[0], netif->name[1]);
+  
+  // assign callbacks for link and status
+  netif_set_link_callback(netif, netif_link_callback);
+  netif_set_status_callback(netif, netif_status_callback);  
+
+  // set the default interface and bring it up
+  netif_set_default(netif);
+  netif_set_up(netif);
+
+  ntp_setup(netif);
+    
+  // don't start dhcp on the ppp interface
+  if(netif->name[0] != 'p' || netif->name[1] != 'p')  {
+    // Start DHCP client unless configured not to do so
+    if(inifile_config_get_int("network", "mode", 1) == 1)    
+      dhcp_start(netif);
+    else {
+      // set static network config. Default is 192.168.0.2/24 and gateway 192.168.0.1
+      ip_addr_t ipaddr, netmask, gw;
+      ip_addr_set_ip4_u32(&ipaddr, htonl(inifile_config_get_ip("network", "ip", 0xc0a80002)));
+      ip_addr_set_ip4_u32(&netmask, htonl(inifile_config_get_ip("network", "mask", 0xffffff00)));
+      ip_addr_set_ip4_u32(&gw, htonl(inifile_config_get_ip("network", "gw", 0xc0a80001)));
+      netif_set_addr(netif, &ipaddr, &netmask, &gw);
+      netif_set_static_dns();
+    }
+  } else
+    usb_debugf("Not starting DHCP for PPP");
+}
+
+static void asix_net_register(asixh_interface_t *itf) {
+  if(!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+    usb_debugf("Ignoring USB network device since TCP stack is not initialized");
+    return;
+  }
+
+  // if wifi has been connected, then no USB networking device will be accepted
+  if((network_status & NETWORK_STATUS_UP) &&
+     (network_status & NETWORK_STATUS_WIFI)) {
+    usb_debugf("Ignoring USB network device since WIFI is connected");
+    return;
+  }
+
+  // It is actually possible to register the usb network if wifi is
+  // available but not connected. However, from this point on in this session, wifi is not
+  // being used anymore, even if the usb network device is being unplugged.  
+  network_status &= ~NETWORK_STATUS_WIFI;
+  
+  memcpy(itf->netif.hwaddr, itf->mac, ETH_HWADDR_LEN);
+  itf->netif.hwaddr_len = ETH_HWADDR_LEN;
+    
+  // initialize the ASIX Ethernet network interface
+  netif_add(&itf->netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL,
+	    netif_asix_low_init, netif_input);
+  
+  itf->netif.name[0] = 'e';
+  itf->netif.name[1] = '0';
+
+  netif_up(&itf->netif);
+}
+
+void tuh_asix_mount_cb(asixh_interface_t *itf) {
+  usb_debugf("%s(%d)", __FUNCTION__, itf->dev_addr);
+  
+  uint8_t xfer_result = tuh_descriptor_get_device_sync(itf->dev_addr, &desc.device, 18);
+  if (XFER_RESULT_SUCCESS != xfer_result) {
+    usb_debugf("Failed to get device descriptor");
+    return;
+  }
+  
+  usb_debugf("ID[%04x:%04x] ASIX Device", desc.device.idVendor, desc.device.idProduct);
+  usb_debugf("Device Descriptor:");
+  usb_debugf("  bLength             %u", desc.device.bLength);
+  usb_debugf("  bDescriptorType     %u", desc.device.bDescriptorType);
+  usb_debugf("  bcdUSB              %04x", desc.device.bcdUSB);
+  usb_debugf("  bDeviceClass        %u", desc.device.bDeviceClass);
+  usb_debugf("  bDeviceSubClass     %u", desc.device.bDeviceSubClass);
+  usb_debugf("  bDeviceProtocol     %u", desc.device.bDeviceProtocol);
+  usb_debugf("  bMaxPacketSize0     %u", desc.device.bMaxPacketSize0);
+  usb_debugf("  idVendor            0x%04x", desc.device.idVendor);
+  usb_debugf("  idProduct           0x%04x", desc.device.idProduct);
+  usb_debugf("  bcdDevice           %04x", desc.device.bcdDevice);
+
+  asix_net_register(itf);
+}
+
+// Invoked when device with asix device is un-mounted
+void tuh_asix_umount_cb(asixh_interface_t *itf) {
+  usb_debugf("[%u] ASIX Device is unmounted", itf->dev_addr);
+
+  // ignore unmount if tcpip stack isn't even initialzed or
+  // if wifi setup is active
+  if(!(network_status & NETWORK_STATUS_TCPIP_INIT) ||
+     (network_status & NETWORK_STATUS_WIFI)) {
+
+    if(network_status & NETWORK_STATUS_WIFI)
+      usb_debugf("Ignoring USB network device since WIFI interface has been detected");
+    
+    if(!(network_status & NETWORK_STATUS_TCPIP_INIT))
+      usb_debugf("Ignoring USB network device since TCP stack is not initialized");
+
+    return;
+  }
+  
+  asix_unmount_in_progress = true;
+
+  netif_set_down(&itf->netif);
+
+  // unregister netif from stack
+  netif_remove(&itf->netif);
+
+  asix_unmount_in_progress = false;
+
+  // On USB unplug, always show a network-down OSD message.
+  menu_notify(MENU_EVENT_NETWORK_DISCONNECTED);
+}
+
+#ifdef ENABLE_PPP
+
+#include "netif/ppp/ppp.h"
+#include "netif/ppp/pppos.h"
+
+// only one CDC device is supported, so only one PPP device can
+// be detected
+static ppp_pcb *ppp;
+static struct netif ppp_netif;
+
+static void ppp_status_cb(ppp_pcb *pcb, int err_code, void *ctx) {
+  switch (err_code) {
+  case PPPERR_NONE:
+    usb_debugf("PPP Connected");
+    break;
+  case PPPERR_AUTHFAIL:
+    usb_debugf("Authentication Failed");
+    break;
+  default:
+    usb_debugf("PPP Error: %d", err_code);
+  }
+}
+
+static int8_t cdc_idx = -1;
+u32_t ppp_output_cb(ppp_pcb *pcb, const void *data, u32_t len, void *ctx) {
+  // forward data to serial port
+  if(cdc_idx < 0) {
+    usb_debugf("CDC not available");
+    return 0;
+  }
+
+  u32_t res = tuh_cdc_write(cdc_idx, data, len);
+  if(res != len) usb_debugf("tuh_cdc_write(): unexpected result %d != %d", res, len);
+  
+  return res;
+}
+
+#endif
+
+static void asix_net_task(__attribute__((unused)) void *parms) {
+  // setup async context exactly like the cyw43 does it
+  async_context_t *context = cyw43_arch_async_context();
+  if (!context) {
+    context = cyw43_arch_init_default_async_context();
+    cyw43_arch_set_async_context(context);
+  }
+
+  lwip_freertos_init(context);
+  network_status |= NETWORK_STATUS_TCPIP_INIT;
+
+#ifdef ENABLE_PPP
+  usb_debugf("Initializing PPP over serial");
+
+  // initialize ppp to be used with the esp32_ppp dongle
+  ppp = pppos_create(&ppp_netif, ppp_output_cb, ppp_status_cb, NULL);
+#endif
+ 
+  vTaskDelete(NULL);
+}  
 
 /* ======================================================================= */
 /* ======                   XBOX controllers                     ========= */
 /* ======================================================================= */
 
-#include "xinput_host.h"
-
-usbh_class_driver_t const* usbh_app_driver_get_cb(uint8_t* driver_count){
-  *driver_count = 1;
-  return &usbh_xinput_driver;
-}
-
 void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_interface_t const* xid_itf, __attribute__((unused)) uint16_t len) {
   const xinput_gamepad_t *p = &xid_itf->pad;
-  
+
   if (xid_itf->last_xfer_result == XFER_RESULT_SUCCESS) {
     if (xid_itf->connected && xid_itf->new_pad_data) {
 
@@ -521,8 +1098,10 @@ void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_i
 	  unsigned char state_btn_extra =
 	    ((p->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER  )?0x01:0x00) |
 	    ((p->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER )?0x02:0x00) |
-	    ((p->wButtons & XINPUT_GAMEPAD_BACK           )?0x10:0x00) | // Rumblepad 2 / Dual Action compatibility
-	    ((p->wButtons & XINPUT_GAMEPAD_START          )?0x20:0x00);
+	    ((p->wButtons & XINPUT_GAMEPAD_BACK           )?0x04:0x00) |
+	    ((p->wButtons & XINPUT_GAMEPAD_START          )?0x08:0x00) |
+      ((p->wButtons & XINPUT_GAMEPAD_LEFT_THUMB     )?0x40:0x00) |
+      ((p->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB    )?0x80:0x00);
 	  
 	  // build analog stick x,y state
 	  int16_t sThumbLX = p->sThumbLX;
@@ -544,10 +1123,10 @@ void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_i
 	    
 	    xbox_state[idx].state = state;
 	    xbox_state[idx].state_btn_extra = state_btn_extra;
-	    xbox_state[idx].state_x = sThumbLX;
-	    xbox_state[idx].state_y = sThumbLY;
+	    xbox_state[idx].state_x = ax;
+	    xbox_state[idx].state_y = ay;
 
-	    // usb_debugf("XBOX Joy%d: B %02x EB %02x X %02x Y %02x", xbox_state[idx].js_index, state, state_btn_extra, byteScaleAnalog(ax), byteScaleAnalog(ay));
+	    // usb_debugf("XBOX Joy%d: B %02x EB %02x X %02x Y %02x", xbox_state[idx].js_index, state, state_btn_extra, ax, ay);
 
 	    if(osd_is_visible()) {	       
 	      // if OSD is visible, then process events locally
@@ -573,6 +1152,8 @@ void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_i
 }
 
 void tuh_xinput_mount_cb(uint8_t dev_addr, uint8_t instance, const xinputh_interface_t *xinput_itf) {
+  const UsbGamepadMap *map;
+
   usb_debugf("xbox mounted %d/%d", dev_addr, instance);
 
   // search for a free xbox entry
@@ -587,6 +1168,29 @@ void tuh_xinput_mount_cb(uint8_t dev_addr, uint8_t instance, const xinputh_inter
     xbox_state[idx].state_x = 0;
     xbox_state[idx].state_y = 0;
     xbox_state[idx].js_index = hid_allocate_joystick();
+
+    tusb_desc_device_t device;
+    if(tuh_descriptor_get_device_local(dev_addr, &device))  {
+      // lookup for VID/PID/Version
+      map = find_usb_gamepad_map(device.idVendor, device.idProduct, device.bcdDevice);
+    
+      if (map) {
+	usb_debugf("Found gamepad map: %s (VID=%04x PID=%04x VER=%04x)",
+		   map->name, map->vid, map->pid, map->version);
+
+	show_map(map);
+      
+	xbox_state[idx].map = map;
+	xbox_state[idx].map_found = 1;
+	xbox_state[idx].map_checked = 1;
+      } else {
+	usb_debugf("No map for VID=%04x PID=%04x, VERSION=%04x",
+		   device.idVendor, device.idProduct, device.bcdDevice);
+	xbox_state[idx].map = NULL;
+	xbox_state[idx].map_found = 0;
+	xbox_state[idx].map_checked = 1;
+      }    
+    }
   } else
     usb_debugf("Error, no more free XBOX entries");
 
@@ -618,10 +1222,87 @@ void tuh_xinput_umount_cb(uint8_t dev_addr, uint8_t instance) {
   usb_check_devices();
 }
 
+#if CFG_TUH_CDC 
+// Invoked when received new data
+void tuh_cdc_rx_cb(uint8_t idx) {
+  static uint8_t buf[128];
+
+  // forward cdc interfaces -> console
+  uint32_t count = tuh_cdc_read(idx, buf, sizeof(buf));
+
+  // Forward the data into lwip/ppp
+  pppos_input(ppp, buf, count);
+}
+
+static void process_line_state_cb(tuh_xfer_t *xfer) {
+  usb_debugf("process_line_state_cb(%d)", xfer->user_data);
+
+  // on esp32: RTS -> EN (reset)
+  //           DTR -> GPIO0  
+  usb_debugf("DTR (GPIO0): %d", tuh_cdc_get_dtr(cdc_idx));
+  usb_debugf("RTS (EN): %d", tuh_cdc_get_rts(cdc_idx));
+    
+  vTaskDelay(pdMS_TO_TICKS(10));
+    
+  // DTR = bit 0, RTS = bit 1
+  if(xfer->user_data == 0)
+    tuh_cdc_set_rts(cdc_idx, 0, process_line_state_cb, 0x1);
+  if(xfer->user_data == 1)
+    tuh_cdc_set_rts(cdc_idx, 1, process_line_state_cb, 0x2);
+  if(xfer->user_data == 2) {  
+    ppp_connect(ppp, 0); // `0` for no holdoff delay
+    ppp_set_usepeerdns(ppp, 1);
+
+    netif_up(&ppp_netif);
+  }
+}
+
+void tuh_cdc_mount_cb(uint8_t idx) {
+  cdc_idx = idx;
+  tuh_itf_info_t itf_info = { 0 };
+  tuh_cdc_itf_get_info(idx, &itf_info);
+
+  usb_debugf("CDC%d Interface is mounted: address = %u, itf_num = %u",
+	     idx, itf_info.daddr, itf_info.desc.bInterfaceNumber);
+
+  cdc_line_coding_t line_coding = { 0 };
+  if (tuh_cdc_get_local_line_coding(idx, &line_coding)) {
+    usb_debugf("  Baudrate: %" PRIu32 ", Stop Bits : %u",
+	       line_coding.bit_rate, line_coding.stop_bits);
+    usb_debugf("  Parity  : %u, Data Width: %u",
+	       line_coding.parity, line_coding.data_bits);
+  }
+
+  // trigger first transfer
+  tuh_xfer_t xfer =  {.user_data=0 };
+  process_line_state_cb(&xfer);
+}
+
+void tuh_cdc_umount_cb(uint8_t idx) {
+  tuh_itf_info_t itf_info = { 0 };
+  tuh_cdc_itf_get_info(idx, &itf_info);
+
+  usb_debugf("CDC Interface is unmounted: address = %u, itf_num = %u",
+	     itf_info.daddr, itf_info.desc.bInterfaceNumber);
+
+  cdc_idx = -1;
+}
+#endif
+
+
 #include "hardware/watchdog.h"
 
 void mcu_hw_reset(void) {
   debugf("HW reset");
+#ifdef ENABLE_WIFI
+  // Leave the access point before the restart (core switch, reset from the menu), else it
+  // still holds the association and drops the first authentication after the restart. The
+  // short wait lets the chip send the disassociation.
+  if((network_status & NETWORK_STATUS_WIFI) && (network_status & NETWORK_STATUS_UP)) {
+    cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    busy_wait_ms(50);
+  }
+#endif
   watchdog_reboot(0, 0, 10);
   while(1);
 }
@@ -631,39 +1312,58 @@ void mcu_hw_reset(void) {
 /* ========================================================================= */
 
 #ifndef ENABLE_WIFI
-void mcu_hw_wifi_scan(void) { }
-void mcu_hw_wifi_connect(__attribute__((unused)) char *ssid, __attribute__((unused)) char *key) { }
-void mcu_hw_tcp_connect(__attribute__((unused)) char *host, __attribute__((unused)) int port) { }
-void mcu_hw_tcp_disconnect(void) { }
-bool mcu_hw_tcp_data(__attribute__((unused)) unsigned char byte) { return false; }
+void mcu_hw_wifi_scan(void) {
+  at_wifi_puts("WiFi not available\r\n");
+}
+bool mcu_hw_wifi_connect(__attribute__((unused)) char *ssid, __attribute__((unused)) char *key) {
+  at_wifi_puts("WiFi not available\r\n");
+  return true;
+}
 #else  
 static bool is_pico_w = false;
 #include "pico/cyw43_arch.h"
 
+// The LED hangs on the cyw43 chip, and writing it needs the cyw43 lock, which
+// other work can hold for a while. So the timer only sets the state, and the
+// cyw43 context writes it: the timer task never waits for that lock.
+static volatile bool led_state_w;   // the state the next write sets
+
+static void led_write_w(__attribute__((unused)) async_context_t *context,
+                        __attribute__((unused)) async_when_pending_worker_t *worker) {
+  cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state_w);   // runs in the cyw43 context
+}
+
+static async_when_pending_worker_t led_worker_w = { .do_work = led_write_w };
+
 static void led_timer_w(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_option_get(INIFILE_OPTION_LED)) {
+  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
   case 0:    
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, state & 1);
+    led_state_w = state & 1;   // blink
     break;
   case 1:    
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    led_state_w = 1;
     break;
   case 2:    
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    led_state_w = 0;
     break;
   }
+  // never blocks, the write follows when the cyw43 context is free
+  async_context_set_work_pending(cyw43_arch_async_context(), &led_worker_w);
     
   state = !state;
 }
 
-// the wifi connection state
-#define WIFI_STATE_UNKNOWN      0
-#define WIFI_STATE_DISCONNECTED 1
-#define WIFI_STATE_CONNECTING   2
-#define WIFI_STATE_CONNECTED    3
-
-static int wifi_state = WIFI_STATE_UNKNOWN;
+// Sets a 32-bit setting (iovar) of the WiFi chip: the name with its NUL, then the value
+// in little endian.
+static int wifi_set_iovar_u32(const char *name, uint32_t val) {
+  uint8_t buf[32];
+  size_t len = strlen(name) + 1;
+  if(len + 4 > sizeof(buf)) return -1;
+  memcpy(buf, name, len);
+  for(int i=0;i<4;i++) buf[len+i] = (val >> (8*i)) & 0xff;
+  return cyw43_ioctl(&cyw43_state, CYW43_IOCTL_SET_VAR, len + 4, buf, CYW43_ITF_STA);
+}
 
 static void mcu_hw_wifi_init(void) {
 #ifdef PICO_RP2350
@@ -671,23 +1371,72 @@ static void mcu_hw_wifi_init(void) {
 #else
   debugf("Detected Pico-W");
 #endif
-  
+
   if(cyw43_arch_init_with_country(CYW43_COUNTRY_GERMANY)) {
-    debugf("WiFi failed to initialised");
+    debugf("WiFi failed to initialise");
     return;
   }
+  
   debugf("WiFi initialised");
-  wifi_state = WIFI_STATE_DISCONNECTED;
+  network_status |= (NETWORK_STATUS_TCPIP_INIT | NETWORK_STATUS_WIFI);
+
+  sntp_servermode_dhcp(!inifile_config_has("ntp", "ip"));
   
   cyw43_arch_enable_sta_mode();
   debugf("STA mode enabled");
 
   cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
 
+  // After a reset the access point may still hold the old association. Some (seen on a
+  // Qualcomm based one) then drop the first authentication while they clear it. Phones send
+  // it again within 200 ms. The chip does the same once it may retry the join (default 0).
+  if(wifi_set_iovar_u32("assoc_retry_max", 3))
+    debugf("WiFi: assoc_retry_max not set");
+
+  // the LED timer hands its writes to the cyw43 context, see led_timer_w()
+  async_context_add_when_pending_worker(cyw43_arch_async_context(), &led_worker_w);
   TimerHandle_t led_timer_handle =
     xTimerCreate("LED timer (W)", pdMS_TO_TICKS(200), pdTRUE,
 		 NULL, led_timer_w);
   xTimerStart(led_timer_handle, 0);
+
+  netif_set_status_callback(netif_default, netif_status_callback);
+
+#ifdef ENABLE_BLUETOOTH
+  // bluetooth needs nothing from config.ini, start it right away
+  bluetooth_init();
+#endif
+
+  // after a cold start com_task reads config.ini only once the FPGA
+  // is up, so wait for it before deciding whether to connect. Without
+  // an FPGA it waits until com_task detects one and restarts
+  if(!inifile_config_is_read()) {
+    debugf("WiFi: waiting for the configuration from the card");
+    inifile_config_wait();
+    debugf("WiFi: configuration is available");
+  }
+
+  // connect to wifi immediately if configured through config file
+  if(inifile_config_has("wifi", "ssid") && inifile_config_has("wifi", "pass")) {
+    network_status |= NETWORK_STATUS_WIFI_AUTO;
+
+    debugf("Connecting to WiFi '%s'", inifile_config_get_str("wifi", "ssid"));
+
+    if(!mcu_hw_wifi_connect(inifile_config_get_str("wifi", "ssid"),
+			    inifile_config_get_str("wifi", "pass"))) {
+      debugf("failed");      
+      network_status &= ~NETWORK_STATUS_WIFI_AUTO;
+    }
+  } else
+    debugf("No WiFi setup");
+
+  //  ntp_setup(NULL);
+  
+#ifdef ENABLE_BLUETOOTH
+  // this will actually never return. But that is no problem
+  // as this task is only needed for wifi init
+  bluetooth_run();
+#endif
 }
 
 static const char *auth_mode_str(int authmode) {
@@ -705,33 +1454,82 @@ static const char *auth_mode_str(int authmode) {
 
   int i;
   for(i=0;mode_str[i].mode != -1;i++)
-    if(mode_str[i].mode == authmode || mode_str[i].mode == -1)
+    if(mode_str[i].mode == authmode)
       return mode_str[i].str;
 
   return mode_str[i].str;
 }
 
+static mcu_hw_wifi_scan_cb_func wifi_scan_cb = NULL;
 static int scan_result(__attribute__((unused)) void *env, const cyw43_ev_scan_result_t *result) {
   if (result) {
     char str[74];
+    // the ssid comes with its length and is not terminated when it
+    // fills all 32 bytes
+    int ssid_len = result->ssid_len < sizeof(result->ssid) ?
+      result->ssid_len : sizeof(result->ssid);
     
-    debugf("ssid: %s rssi: %d chan: %d sec: %u",
-	   result->ssid, result->rssi, result->channel,
+    debugf("ssid: %.*s rssi: %d chan: %d sec: %u",
+	   ssid_len, result->ssid, result->rssi, result->channel,
 	   result->auth_mode);
 
-    snprintf(str, sizeof(str), "SSID %s, RSSI %d, CH %d, %s\r\n",
-	     result->ssid, result->rssi, result->channel,
-	     auth_mode_str(result->auth_mode));
-
-    at_wifi_puts(str);
+    if(wifi_scan_cb) {
+      // allocate reply. It's up to the callee to free this
+      mcu_hw_scan_result_t *res = pvPortMalloc(sizeof(mcu_hw_scan_result_t));
+      char *ssid = pvPortMalloc(ssid_len+1);
+      memcpy(ssid, result->ssid, ssid_len);
+      ssid[ssid_len] = '\0';
+      res->ssid = ssid;
+      res->next = NULL;
+			       
+      wifi_scan_cb(res);
+    } else {     
+      snprintf(str, sizeof(str), "SSID %.*s, RSSI %d, CH %d, %s\r\n",
+	       ssid_len, result->ssid, result->rssi, result->channel,
+	       auth_mode_str(result->auth_mode));
+      
+      at_wifi_puts(str);
+    }
   }
   return 0;
 }
 
-void mcu_hw_wifi_scan(void) {
-  debugf("WiFi: Performing scan");
-    
+char mcu_hw_wifi_scan_start(mcu_hw_wifi_scan_cb_func cb) {
   cyw43_wifi_scan_options_t scan_options = {0};
+  wifi_scan_cb = cb;
+  int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_result);
+  if(err) {
+    debugf("Scan failed");
+    return -1;
+  }
+  return 0;
+}
+
+static bool wifi_available(void) {
+  // refuse to scan wifi stack has not been initialized or it's
+  // not a wifi setup (but usb ethernet)
+  if(!(network_status & NETWORK_STATUS_TCPIP_INIT) ||
+     !(network_status & NETWORK_STATUS_WIFI)) {
+
+    if(!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+      debugf("Ignoring WiFi command since TCP stack is not initialized");
+      at_wifi_puts("TCPIP not available\r\n");
+    } else if(!(network_status & NETWORK_STATUS_WIFI)) {
+      debugf("Ignoring WiFi command since network hardware is not wifi");
+      at_wifi_puts("WiFi not available\r\n");
+    }    
+    return false;
+  }  
+  return true;
+}
+
+void mcu_hw_wifi_scan(void) {
+  if(!wifi_available()) return;
+  
+  debugf("WiFi: Performing scan");
+
+  cyw43_wifi_scan_options_t scan_options = {0};
+  wifi_scan_cb = NULL;
   int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_result);
   if(err) {
     at_wifi_puts("Scan failed\r\n");
@@ -742,23 +1540,123 @@ void mcu_hw_wifi_scan(void) {
 
   while(cyw43_wifi_scan_active(&cyw43_state))
     vTaskDelay(pdMS_TO_TICKS(10));
-  }
+}
 
-void mcu_hw_wifi_connect(char *ssid, char *key) {
+// Joins and waits for the link, a replacement for cyw43_arch_wifi_connect_timeout_ms().
+// When the chip retries a failed authentication (assoc_retry_max), the driver reports the
+// failure for a few milliseconds before the retry succeeds, and the SDK function takes that
+// as final. Here a failure counts only once it has held for a second. Returns PICO_OK or a
+// PICO_ERROR_* code like the SDK function.
+static int wifi_join(const char *ssid, const char *key, uint32_t timeout_ms) {
+  // start the join, the chip and the driver work on it in the background
+  int err = cyw43_arch_wifi_connect_async(ssid, key, CYW43_AUTH_WPA2_AES_PSK);
+  if(err) return err;
+
+  TickType_t start = xTaskGetTickCount(), fail_since = 0;
+  bool failing = false;            // the link status has been negative since fail_since
+  for(;;) {
+    // the driver's view of the join, polled every 10 ms
+    int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+    TickType_t now = xTaskGetTickCount();
+
+    // joined, keys exchanged and an IP address from DHCP: done
+    if(status == CYW43_LINK_UP)
+      return PICO_OK;
+
+    if(status == CYW43_LINK_NONET) {
+      // no access point with this SSID found (out of range or not up yet): start the
+      // join again, as the SDK function does
+      failing = false;
+      err = cyw43_arch_wifi_connect_async(ssid, key, CYW43_AUTH_WPA2_AES_PSK);
+      if(err) return err;
+    } else if(status < 0) {
+      // BADAUTH or FAIL. After an unanswered authentication the driver shows BADAUTH while
+      // the chip already sends the authentication again, and a good answer turns the state
+      // back to joining. Only a failure that lasts for a second is final, e.g. FAIL once
+      // the chip has given up.
+      if(!failing) { failing = true; fail_since = now; }
+      else if(now - fail_since >= pdMS_TO_TICKS(1000))
+        return status == CYW43_LINK_BADAUTH ? PICO_ERROR_BADAUTH : PICO_ERROR_CONNECT_FAILED;
+    } else
+      failing = false;             // still joining, or joined and waiting for DHCP
+
+    // no link within the time limit, e.g. a wrong key: the driver keeps joining and
+    // reports no failure state for that
+    if(now - start >= pdMS_TO_TICKS(timeout_ms))
+      return PICO_ERROR_TIMEOUT;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// The cyw43 driver always starts DHCP on the STA interface. Apply the
+// [NETWORK] section of config.ini the same way netif_up() does for usb ethernet.
+static void wifi_apply_network_config(void) {
+  if(inifile_config_get_int("network", "mode", 1) == 1) return;  // dhcp (default)
+
+  ip_addr_t ipaddr, netmask, gw;
+  ip_addr_set_ip4_u32(&ipaddr, htonl(inifile_config_get_ip("network", "ip", 0xc0a80002)));
+  ip_addr_set_ip4_u32(&netmask, htonl(inifile_config_get_ip("network", "mask", 0xffffff00)));
+  ip_addr_set_ip4_u32(&gw, htonl(inifile_config_get_ip("network", "gw", 0xc0a80001)));
+
+  struct netif *netif = &cyw43_state.netif[CYW43_ITF_STA];
+  cyw43_arch_lwip_begin();
+  dhcp_stop(netif);
+  netif_set_addr(netif, ip_2_ip4(&ipaddr), ip_2_ip4(&netmask), ip_2_ip4(&gw));
+  netif_set_static_dns();
+  cyw43_arch_lwip_end();
+  debugf("WiFi: static ip %s", ip4addr_ntoa(netif_ip4_addr(netif)));
+}
+
+bool mcu_hw_wifi_connect(char *ssid, char *key) {
+  if(!wifi_available()) return false;
+
+  wifi_apply_network_config();
 
   debugf("WiFI: connect to %s/%s", ssid, key);
   
-  at_wifi_puts("Connecting...");
-  if(cyw43_arch_wifi_connect_timeout_ms(ssid, key, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-    at_wifi_puts("\r\nConnection failed!\r\n");
+  if(!(network_status & NETWORK_STATUS_WIFI_AUTO))
+    at_wifi_puts("Connecting...");
+  
+  int err = wifi_join(ssid, key, 30000);
+  if(err) {
+    debugf("WiFI: connect failed, error %d", err);
+    // the chip keeps rejoining in the background otherwise (wrong key: every few seconds)
+    cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    if(!(network_status & NETWORK_STATUS_WIFI_AUTO))
+      at_wifi_puts("\r\nConnection failed!\r\n");
+
+    return false;
   } else {
-    at_wifi_puts("\r\nConnected\r\n");
-  }  
+    if(!(network_status & NETWORK_STATUS_WIFI_AUTO))
+      at_wifi_puts("\r\nConnected\r\n");
+    
+    network_status |= NETWORK_STATUS_UP;
+  }
+  return true;
 }
+#endif
 
 #include "lwip/dns.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+
+static bool network_available(void) {
+  // refuse to scan wifi stack has not been initialized or it's
+  // not a wifi setup (but usb ethernet)
+  if(!(network_status & NETWORK_STATUS_TCPIP_INIT) ||
+     !(network_status & NETWORK_STATUS_UP)) {
+
+    if(!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+      debugf("Ignoring command since TCP stack is not initialized");
+      at_wifi_puts("TCPIP not available\r\n");
+    } else if(!(network_status & NETWORK_STATUS_UP)) {
+      debugf("Ignoring command since network is down or disconnected");
+      at_wifi_puts("Network not available\r\n");
+    }    
+    return false;
+  }  
+  return true;
+}
 
 static struct tcp_pcb *tcp_pcb = NULL;
 
@@ -770,19 +1668,36 @@ static err_t mcu_tcp_connected( __attribute__((unused)) void *arg, __attribute__
   
   debugf("Connected");
   at_wifi_puts("Connected\r\n");
-  wifi_state = WIFI_STATE_CONNECTED;  // connected
+  network_status |= NETWORK_STATUS_TCP_CONNECTED;
   return ERR_OK;
+}
+
+// when using irq driven wifi, the tcp socket interface needs to be protected
+// by a semaphore
+static inline void lwip_check(void) {
+  if(network_status & NETWORK_STATUS_WIFI)
+    cyw43_arch_lwip_check();
+}
+
+static inline void lwip_begin(void) {
+  if(network_status & NETWORK_STATUS_WIFI)
+    cyw43_arch_lwip_begin();
+}
+
+static inline void lwip_end(void) {
+  if(network_status & NETWORK_STATUS_WIFI)
+    cyw43_arch_lwip_end();
 }
 
 static void mcu_tcp_err(__attribute__((unused)) void *arg, err_t err) {
   if( err == ERR_RST) {
     debugf("tcp connection reset");
     at_wifi_puts("\r\nNO CARRIER\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;      
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
   } else if (err == ERR_ABRT) {
     debugf("err abort");
     at_wifi_puts("Connection failed\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;    
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
   } else {
     debugf("tcp_err %d", err);
   }
@@ -792,14 +1707,14 @@ err_t mcu_tcp_recv(__attribute__((unused)) void *arg, struct tcp_pcb *tpcb, stru
   if (!p) {
     debugf("No data, disconnected?");
     at_wifi_puts("\r\nNO CARRIER\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;    
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
     return ERR_OK;
   }
 
   // this method is callback from lwIP, so cyw43_arch_lwip_begin is not required, however you
   // can use this method to cause an assertion in debug mode, if this method is called when
   // cyw43_arch_lwip_begin IS needed
-  cyw43_arch_lwip_check();
+  lwip_check();
   if (p->tot_len > 0) {
     // debugf("recv %d err %d", p->tot_len, err);
 
@@ -814,6 +1729,8 @@ err_t mcu_tcp_recv(__attribute__((unused)) void *arg, struct tcp_pcb *tpcb, stru
 }
 
 static void mcu_tcp_connect(const ip_addr_t *ipaddr, int port) {
+  if(!network_available()) return;
+
   debugf("Connecting to IP %s %d", ipaddr_ntoa(ipaddr), port);
   
   // the address was resolved and we can connect
@@ -821,31 +1738,34 @@ static void mcu_tcp_connect(const ip_addr_t *ipaddr, int port) {
   if (!tcp_pcb) {    
     debugf("Unable to create pcb");
     at_wifi_puts("Connection failed!\r\n");
+    return;
   }
 
   tcp_recv(tcp_pcb, mcu_tcp_recv);
   tcp_err(tcp_pcb, mcu_tcp_err);
   
-  cyw43_arch_lwip_begin();
+  lwip_begin();
   err_t err = tcp_connect(tcp_pcb, ipaddr, port, mcu_tcp_connected);
-  cyw43_arch_lwip_end();
+  lwip_end();
 
   if(err) {
     debugf("tcp_connect() failed"); 
     at_wifi_puts("Connection failed!\r\n");
-  } else
-    wifi_state = WIFI_STATE_CONNECTING;    
+  }
 }
 
 void mcu_hw_tcp_disconnect(void) {
-  if(wifi_state == WIFI_STATE_CONNECTED)
+  if(!network_available()) return;
+  
+  if(!(network_status & NETWORK_STATUS_TCP_CONNECTED))
+    at_wifi_puts("Not connected!\r\n");
+  else
     tcp_close(tcp_pcb);
 }
 
 // Call back with a DNS result
 static void dns_found(__attribute__((unused)) const char *hostname, const ip_addr_t *ipaddr, void *arg) {
   if (ipaddr) {
-    // state->ntp_server_address = *ipaddr;
     at_wifi_puts("Using address ");
     at_wifi_puts(ipaddr_ntoa(ipaddr));
     at_wifi_puts("\r\n");
@@ -859,12 +1779,14 @@ void mcu_hw_tcp_connect(char *host, int port) {
   static int lport;
   static ip_addr_t address;
 
+  if(!network_available()) return;
+
   lport = port;
   debugf("connecting to %s %d", host, lport);
   
-  cyw43_arch_lwip_begin();
+  lwip_begin();
   int err = dns_gethostbyname(host, &address, dns_found, &lport);
-  cyw43_arch_lwip_end();
+  lwip_end();
 
   if(err != ERR_OK && err != ERR_INPROGRESS) {
     debugf("DNS error");
@@ -880,10 +1802,10 @@ void mcu_hw_tcp_connect(char *host, int port) {
 }
 
 bool mcu_hw_tcp_data(unsigned char byte) {
-  if(wifi_state == WIFI_STATE_CONNECTED) {
-    cyw43_arch_lwip_begin();
+  if(network_status & NETWORK_STATUS_TCP_CONNECTED) {
+    lwip_begin();
     err_t err = tcp_write(tcp_pcb, &byte, 1, TCP_WRITE_FLAG_COPY);
-    cyw43_arch_lwip_end();
+    lwip_end();
     if (err != ERR_OK) debugf("Failed to write data %d", err);
 
     return true;
@@ -891,7 +1813,6 @@ bool mcu_hw_tcp_data(unsigned char byte) {
     
   return false;  // data has not been processed (we are not connected)
 }
-#endif
 
 #ifndef WS2812_PIN
 // the LED PIN is not defined if we build for a pico-w. But we
@@ -901,7 +1822,7 @@ bool mcu_hw_tcp_data(unsigned char byte) {
 #endif
 
 static void led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
-  switch(inifile_option_get(INIFILE_OPTION_LED)) {
+  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
   case 0:    
     gpio_xor_mask( 1u << PICO_DEFAULT_LED_PIN );
     break;
@@ -936,6 +1857,8 @@ void mcu_hw_main_loop(void) {
 static void wifi_task(__attribute__((unused)) void *parms) {
   debugf("WiFi init task ...");
 
+  // wifi init only returns if bluetooth is not enabled. Otherwise
+  // it will run the bluetooth main loop
   mcu_hw_wifi_init();
 
   // only used for init
@@ -948,7 +1871,7 @@ static void wifi_task(__attribute__((unused)) void *parms) {
 
 static void ws_led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_option_get(INIFILE_OPTION_LED)) {
+  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
   case 0:    
     pio_sm_put_blocking(pio0, 0, state?WS2812_COLOR:0);
     break;
@@ -1045,8 +1968,31 @@ uint32_t getFreeHeap(void) {
 
 static bool jtag_is_active = false;
 
-//#define DEBUG_JTAG    // debug raw JTAG IO
-//#define DEBUG_TAP     // set to follow the JTAG state machine
+// Enabling any of the following debug mechanisms will disable the use
+// of PIO driven HW JTAG on the rp2350 and use software driven JTAG instead.
+// #define DEBUG_JTAG    // debug raw JTAG IO
+// #define DEBUG_TAP     // set to follow the JTAG state machine
+
+// Enable PIO JTAG whenever running on a RP2350
+// TODO: This should be disabled when TAP debugging is wanted
+#ifdef PICO_RP2350
+#if defined(DEBUG_JTAG) || defined(DEBUG_TAP)
+#warning "Disabling JTAG PIO since JTAG debugging is enabled"
+#else
+#define USE_PIO_JTAG
+#endif
+#endif
+
+#ifdef USE_PIO_JTAG
+static pio_jtag_inst_t pio_jtag;
+static uint32_t pio_jtag_clock_value = 6000000;
+enum { PIO_JTAG_MAX_BITS = sizeof(pio_jtag.write_buffer) * 4 };
+#else
+// Using the gpio functions directly without any further delay results
+// in a max clock rate of about 6Mhz.
+#define MCU_HW_JTAG_CLK_HI()   gpio_put(PIN_JTAG_TCK, 1);
+#define MCU_HW_JTAG_CLK_LOW()  gpio_put(PIN_JTAG_TCK, 0);
+#endif
 
 #ifdef DEBUG_TAP
 #define JTAG_STATE_TEST_LOGIC_RESET  0
@@ -1221,12 +2167,28 @@ void mcu_hw_jtag_set_pins(uint8_t dir, uint8_t data) {
   // check if the pin direction pattern matches JTAG
   if((dir & 0x0f) == 0x0b) {
     jtag_is_active = true;
-    
+
 #ifdef DEBUG_JTAG
     jtag_debugf("DIR pattern matches JTAG");
 #endif
     // JTAG may actually be disabled on the FPGA. Try to detect the
     // FPGA and if none is detected, try to reconfigure it
+#ifdef USE_PIO_JTAG
+    if(!pio_jtag.pio) {
+      jtag_debugf("Enabling PIO JTAG on PIO2");
+    
+      // setup PIO JTAG for PIO2
+      pio_jtag.pio = pio2;
+      pio_jtag.pin_tck = PIN_JTAG_TCK;
+      pio_jtag.pin_tdi = PIN_JTAG_TDI;
+      pio_jtag.pin_tdo = PIN_JTAG_TDO;
+      pio_jtag.pin_tms = PIN_JTAG_TMS;
+      pio_jtag.write_pending = false;
+      
+      // Use 6MHz JTAG clock by default
+      pio_jtag_init(&pio_jtag, pio_jtag_clock_value/1000);
+    }
+#endif
 
     // send a bunch of 1's to return into Test-Logic-Reset state.
     mcu_hw_jtag_tms(1, 0b11111, 5);
@@ -1243,7 +2205,7 @@ void mcu_hw_jtag_set_pins(uint8_t dir, uint8_t data) {
   
     jtag_debugf("IDCODE = %08lx", idcode);
 
-    // anything bit all 1's or all 0's indicates that JTAG seems to
+    // anything but all 1's or all 0's indicates that JTAG seems to
     // be working
     if((idcode == 0xffffffff) || (idcode == 0x00000000)) {
       jtag_highlight_debugf("JTAG doesn't seem to work. Forcing non-flash reconfig");
@@ -1255,6 +2217,11 @@ void mcu_hw_jtag_set_pins(uint8_t dir, uint8_t data) {
 
 // send up to 8 TMS bits with a given fixed TDI state
 uint8_t mcu_hw_jtag_tms(uint8_t tdi, uint8_t data, int len) {
+#ifdef USE_PIO_JTAG
+  uint8_t rx[2] = {0};
+  pio_jtag_write_tms(&pio_jtag, true, tdi, &data, rx, len);
+  return rx[0];
+#else
   int dlen = len & 7;
   uint8_t mask = 1;
   uint8_t rx = 0;
@@ -1263,7 +2230,7 @@ uint8_t mcu_hw_jtag_tms(uint8_t tdi, uint8_t data, int len) {
 
   while(len--) {
     gpio_put(PIN_JTAG_TMS, (data & mask)?1:0);  
-    gpio_put(PIN_JTAG_TCK, 1);
+    MCU_HW_JTAG_CLK_HI();
 
 #ifdef DEBUG_TAP
     jtag_tap_advance_state((data & mask)?1:0, tdi);
@@ -1279,17 +2246,34 @@ uint8_t mcu_hw_jtag_tms(uint8_t tdi, uint8_t data, int len) {
     
     if(gpio_get(PIN_JTAG_TDO)) rx |= mask;
     
-    gpio_put(PIN_JTAG_TCK, 0);
+    MCU_HW_JTAG_CLK_LOW();
 
     mask <<= 1;
   }
 
   // adjust for the fact that we aren't really shifting
-  rx <<= 8-dlen;
+  if(dlen) rx <<= 8-dlen;
   return rx;
+#endif
 }
 
 void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
+#ifdef USE_PIO_JTAG
+  // jtag_debugf("mcu_hw_jtag_data(%p,%p,%d)", txd, rxd, len);  
+  // Each JTAG bit expands to two bits in the PIO driver's write buffer.
+  while(len > 0) {
+    int bits = len > PIO_JTAG_MAX_BITS ? PIO_JTAG_MAX_BITS : len;
+    // The PIO driver also receives a trailing byte for byte-aligned transfers.
+    uint8_t rx[PIO_JTAG_MAX_BITS / 8 + 1];
+    pio_jtag_write_tdi_read_tdo(&pio_jtag, true, txd, rxd ? rx : NULL, bits);
+    if(rxd) {
+      memcpy(rxd, rx, (bits + 7) / 8);
+      rxd += bits / 8;
+    }
+    if(txd) txd += bits / 8;
+    len -= bits;
+  }
+#else
   uint8_t mask = 1;
   int dlen = len & 7;
 
@@ -1313,14 +2297,14 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
     len >>= 3;
     while(len--) {
       // set data bit and clock tck at once
-      gpio_put(PIN_JTAG_TDI, *txd & 0x01); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x02); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x04); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x08); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x10); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x20); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x40); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
-      gpio_put(PIN_JTAG_TDI, *txd & 0x80); gpio_put(PIN_JTAG_TCK, 1); gpio_put(PIN_JTAG_TCK, 0);
+      gpio_put(PIN_JTAG_TDI, *txd & 0x01); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x02); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x04); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x08); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x10); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x20); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x40); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
+      gpio_put(PIN_JTAG_TDI, *txd & 0x80); MCU_HW_JTAG_CLK_HI(); MCU_HW_JTAG_CLK_LOW();
       txd++;
     }
   } else {  
@@ -1330,7 +2314,7 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
       
       // set data bit and clock tck at once
       gpio_put(PIN_JTAG_TDI, tx_bit);  
-      gpio_put(PIN_JTAG_TCK, 1);
+      MCU_HW_JTAG_CLK_HI();
       
 #ifdef DEBUG_TAP
       jtag_tap_advance_state(0, tx_bit);
@@ -1346,7 +2330,7 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
 	else                       *rxd &= ~mask;
       }
       
-      gpio_put(PIN_JTAG_TCK, 0);
+      MCU_HW_JTAG_CLK_LOW();
       
       // advance bit mask
       mask <<= 1;
@@ -1358,7 +2342,7 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
       len--;
     }    
   }
-    
+
   // We aren't really shifting, but instead setting bits
   // via mask. This makes a difference for the last byte
   // when not reading all 8 bits
@@ -1366,19 +2350,41 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
     // jtag_highlight_debugf("last byte %02x, rshift = %d", *rxd, dlen);
     *rxd <<= 8-dlen;
   }
+#endif
 }
 
 void mcu_hw_jtag_toggleClk(uint32_t clk_len) {
-  while(clk_len--) {
-    gpio_put(PIN_JTAG_TCK, 1);
-    gpio_put(PIN_JTAG_TCK, 0);
+#ifdef USE_PIO_JTAG
+  // this is being used if the MCU is locally generating JTAG signales e.g. when
+  // uploading a core from sd card
+  while(clk_len > PIO_JTAG_MAX_BITS) {
+    pio_jtag_write_tdi(&pio_jtag, true, NULL, PIO_JTAG_MAX_BITS);
+    clk_len -= PIO_JTAG_MAX_BITS;
   }
+  if(clk_len) pio_jtag_write_tdi(&pio_jtag, true, NULL, clk_len);
+#else
+  while(clk_len--) {
+    MCU_HW_JTAG_CLK_HI();
+    MCU_HW_JTAG_CLK_LOW();
+  }
+#endif
+}
+
+void mcu_hw_jtag_set_clock(uint32_t clk) {
+  // Only PIO mode actually allows to adjust the clock. GPIO mode
+  // will always run at ~6MHz
+#ifdef USE_PIO_JTAG
+  jtag_debugf("mcu_hw_jtag_set_clock(%lu)", clk);
+  pio_jtag_clock_value = clk;
+  
+  pio_jtag_set_clk_freq(&pio_jtag, clk/1000);
+#endif  
 }
 
 static void mcu_hw_jtag_init(void) {
   // -------- init FPGA control pins ---------
 
-#if (MISTLE_BOARD == 4)
+#if (MISTLE_BOARD == 4) || (MISTLE_BOARD == 6)
   // FPGA mode pins. Init as inputs, so the buttons work
   gpio_init(PIN_MODE0); // gpio_put(PIN_MODE0, 0);
   gpio_set_dir(PIN_MODE0, GPIO_IN);
@@ -1400,12 +2406,12 @@ static void mcu_hw_jtag_init(void) {
 void mcu_hw_fpga_reconfig(bool run) {
   // alternally the FPGA may be put into a mode != 00 to
   // suppress MSPI loading
-#if (MISTLE_BOARD == 4)
+#if MISTLE_BOARD == 4 || MISTLE_BOARD == 6
   if(!run) {
     gpio_put(PIN_MODE0, 1); gpio_set_dir(PIN_MODE0, GPIO_OUT);
     gpio_put(PIN_MODE1, 0); gpio_set_dir(PIN_MODE1, GPIO_OUT);
   }
-    
+
   // trigger FPGA reconfiguration
   gpio_put(PIN_nCFG, 0);  vTaskDelay(pdMS_TO_TICKS(1));
   gpio_put(PIN_nCFG, 1);  vTaskDelay(pdMS_TO_TICKS(100));
@@ -1414,6 +2420,15 @@ void mcu_hw_fpga_reconfig(bool run) {
   gpio_set_dir(PIN_MODE0, GPIO_IN);
   gpio_set_dir(PIN_MODE1, GPIO_IN);  
 #endif
+}
+#endif
+
+#ifdef PIN_3WAY_SELECT
+static void button_irq_handler(void) {
+  if(gpio_get_irq_event_mask(PIN_3WAY_CLICK) & GPIO_IRQ_EDGE_FALL) {
+    gpio_acknowledge_irq(PIN_3WAY_CLICK, GPIO_IRQ_EDGE_FALL);
+    menu_notify(MENU_EVENT_TOGGLE);
+  }
 }
 #endif
 
@@ -1453,6 +2468,17 @@ void mcu_hw_init(void) {
 
   mcu_hw_spi_init();
 
+#ifdef PIN_3WAY_SELECT
+  // Initialize 3WAY button as input and use it as a menu
+  // button during runtime. This would be extended to use the
+  // 3way on the Mini20K to control the menu
+  gpio_init(PIN_3WAY_SELECT);
+  gpio_set_dir(PIN_3WAY_SELECT, GPIO_IN);
+  gpio_pull_up(PIN_3WAY_SELECT);
+  gpio_set_irq_enabled(PIN_3WAY_SELECT, GPIO_IRQ_EDGE_FALL, true);
+  gpio_add_raw_irq_handler(PIN_3WAY_SELECT, button_irq_handler);  
+#endif
+  
   // initialize the LED gpios
 #ifdef LED_MOUSE_PIN
   debugf("LED MOUSE    = %d", LED_MOUSE_PIN);
@@ -1481,7 +2507,7 @@ void mcu_hw_init(void) {
   };
   tusb_init(BOARD_TUH_RHPORT, &host_init);
   
-#if (MISTLE_BOARD == 2) ||(MISTLE_BOARD == 4) || (MISTLE_BOARD == 5)
+#if (MISTLE_BOARD == 4) || (MISTLE_BOARD == 5) || (MISTLE_BOARD == 6) || (MISTLE_BOARD == 7)
   tusb_rhport_init_t dev_init = {
     .role = TUSB_ROLE_DEVICE,
     .speed = TUSB_SPEED_AUTO
@@ -1499,35 +2525,51 @@ void mcu_hw_init(void) {
     xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, ws_led_timer);
   xTimerStart(led_timer_handle, 0);
 #endif
+
+#if !defined(WS2812_PIN) || defined(ENABLE_WIFI)
+  // a regular non-ws2812 led or the wifi detection needs gpio25  
+  gpio_init(PICO_DEFAULT_LED_PIN);
+  gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+#endif
   
 #ifdef ENABLE_WIFI
+  // gpio25 on the pico-w/pico2-w is cs for the wifi module but also disconnects
+  // the vsys input. On a regular non-w pico it controls the on-board led and vsys
+  // monitoring is permanently enabled. So if we can read a sane VSYS voltage with
+  // gpio25 being low, then we are on a regular non-w pico
+  gpio_put(PICO_DEFAULT_LED_PIN, 0);
+  
   adc_init();
   adc_gpio_init(29);
   adc_select_input(3);
+  sleep_ms(10);  // wait a few ms to get a stable value
 
   uint16_t result = adc_read();
-  debugf("ADC3 value: 0x%03x", result);
+  debugf("ADC3 value: 0x%03x/%d -> VSYS = %.2fV", result, result, result * 3.3 / 65536 * 33);	 
   is_pico_w = result < 0x100;
-
+  
   if(!is_pico_w)
 #endif
     {
 #ifndef WS2812_PIN
-      // prepare for using a regular led
-      gpio_init(PICO_DEFAULT_LED_PIN);
-      gpio_set_dir(PICO_DEFAULT_LED_PIN, 1);
+      // the LED pin has already been setup to detect a PICO-W
       gpio_put(PICO_DEFAULT_LED_PIN, !PICO_DEFAULT_LED_PIN_INVERTED);
       
       TimerHandle_t led_timer_handle =
 	xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, led_timer);
       xTimerStart(led_timer_handle, 0);
 #endif
+
+      // start a init thread
+      xTaskCreate(asix_net_task, (char *)"asix_net_task", 2048, NULL, configMAX_PRIORITIES-10, NULL);
     }
 #ifdef ENABLE_WIFI
-  else
+  else {
     xTaskCreate(wifi_task, (char *)"wifi_task", 2048, NULL, configMAX_PRIORITIES-10, NULL);  
+  }
 #endif
 
+  debugf("Running on core %d", get_core_num());
   debugf("SDK heap total: %ld, free: %ld", getTotalHeap() ,getFreeHeap());
   debugf("FreeRTOS heap total: %u, free: %u", configTOTAL_HEAP_SIZE, xPortGetFreeHeapSize());
 
@@ -1545,7 +2587,7 @@ void mcu_hw_upload_core(char *name) {
 
   // if the core is to be loaded from sd card, then the hw may need
   // to hand card access over from FPGA to the MCU
-#if MISTLE_BOARD == 4   // DEV20k
+#if MISTLE_BOARD == 4 || MISTLE_BOARD == 6   // DEV20k/DEV25K
   if(strncasecmp(name, "/sd", 3) == 0)
     sdio_take_over();
 #endif

@@ -32,7 +32,6 @@
 #include "bl616_glb.h"
 #include "bflb_mtimer.h"
 #include "bflb_spi.h"
-#include "bflb_dma.h"
 #include "bflb_gpio.h"
 #include "bflb_wdg.h"
 #include "bflb_sdh.h"
@@ -44,9 +43,18 @@
 #endif
 #include "bflb_clock.h"
 #include "bflb_flash.h"
-#include "bflb_xip_sflash.h"
-#include "bflb_sf_ctrl.h"
-#include "board_flash_psram.h"
+#include "bflb_sec_mutex.h"
+
+#include "lwip/opt.h"
+#include "lwip/init.h"
+#include "netif/etharp.h"
+#include "lwip/netif.h"
+#include "lwip/netifapi.h"
+#include "lwip/dhcp.h"
+#include "lwip/prot/dhcp.h"
+#include "lwip/apps/sntp.h"
+#include "usbh_rtl8152.h"
+#include "usbh_asix.h"
 
 #include <lwip/tcpip.h>
 #include <lwip/sockets.h>
@@ -54,16 +62,11 @@
 #include <lwip/pbuf.h>
 #include <lwip/tcp.h>
 #include <lwip/dns.h>
-#include "fhost_api.h"
 #include "wifi_mgmr_ext.h"
-#include "wifi_mgmr.h"
 #include "rfparam_adapter.h"
 
 #include "bflb_rtc.h" 
-#include "bflb_acomp.h"
-#include "bflb_efuse.h"
 #include "board.h"
-#include "bl616_tzc_sec.h"
 #include "task.h"
 #include "timers.h"
 #include "bflb_irq.h"
@@ -86,9 +89,17 @@ extern void bl_show_chipinfo(void);
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_UART_TX  GPIO_PIN_11
-#define PIN_UART_RX  GPIO_PIN_22
+#define PIN_UART_RX  GPIO_PIN_20
+#elif TANG_NANO20K_V3923
+#warning "Building for TANG_NANO20K internal BL616 v3923"
+#include "../jtag.h"
+#include "./sdc_direct.h"
+#define PIN_UART_TX  GPIO_PIN_11
+#define PIN_UART_RX  GPIO_PIN_20
 #elif M0S_DOCK
 #warning "Building for M0S DOCK BL616"
+#include "../jtag.h"
+#include "./sdc_direct.h"
 #define PIN_UART_TX  GPIO_PIN_21
 #define PIN_UART_RX  GPIO_PIN_22
 #elif TANG_MEGA138KPRO
@@ -118,7 +129,7 @@ extern void bl_show_chipinfo(void);
 
 static struct bflb_device_s *gpio;
 
-#if defined(TANG_NANO20K)
+#if defined(TANG_NANO20K)||defined(TANG_NANO20K_V3923)
 #define PIN_JTAG_TMS GPIO_PIN_16
 #define PIN_JTAG_TCK GPIO_PIN_10
 #define PIN_JTAG_TDI GPIO_PIN_12
@@ -127,6 +138,15 @@ volatile uint32_t *reg_gpio_tms = (volatile uint32_t *)0x20000904; // gpio_cfg16
 volatile uint32_t *reg_gpio_tck = (volatile uint32_t *)0x200008ec; // gpio_cfg10
 volatile uint32_t *reg_gpio_tdo = (volatile uint32_t *)0x200008fc; // gpio_cfg14
 volatile uint32_t *reg_gpio_tdi = (volatile uint32_t *)0x200008f4; // gpio_cfg12
+#elif defined(M0S_DOCK)
+#define PIN_JTAG_TMS GPIO_PIN_0
+#define PIN_JTAG_TCK GPIO_PIN_1
+#define PIN_JTAG_TDI GPIO_PIN_3
+#define PIN_JTAG_TDO GPIO_PIN_20
+volatile uint32_t *reg_gpio_tms = (volatile uint32_t *)0x200008c4; // gpio_cfg0
+volatile uint32_t *reg_gpio_tck = (volatile uint32_t *)0x200008c8; // gpio_cfg1
+volatile uint32_t *reg_gpio_tdo = (volatile uint32_t *)0x20000914; // gpio_cfg20
+volatile uint32_t *reg_gpio_tdi = (volatile uint32_t *)0x200008d0; // gpio_cfg3
 #else
 #define PIN_JTAG_TMS GPIO_PIN_0
 #define PIN_JTAG_TCK GPIO_PIN_1
@@ -175,7 +195,9 @@ static void mcu_hw_jtag_init(void);
 #include <queue.h>
 #include <hardware/bl616.h>
 
-#define MAX_REPORT_SIZE   8
+#define MAX_REPORT_SIZE   256
+#define MAX_JS_PER_IFACE  2
+#define MAX_HID_REPORT_DESC_SIZE 2048
 #define XBOX_REPORT_SIZE 20
 
 #define STATE_NONE      0 
@@ -190,8 +212,32 @@ static void mcu_hw_jtag_init(void);
 #define XINPUT_GAMEPAD_DPAD_RIGHT 0x0008
 #define XINPUT_GAMEPAD_START 0x0010
 #define XINPUT_GAMEPAD_BACK 0x0020
+#define XINPUT_GAMEPAD_LEFT_THUMB	0x0040
+#define XINPUT_GAMEPAD_RIGHT_THUMB	0x0080
 #define XINPUT_GAMEPAD_LEFT_SHOULDER 0x0100
 #define XINPUT_GAMEPAD_RIGHT_SHOULDER 0x0200
+
+static const UsbGamepadMap data_frog_pc07 =
+  { "03000000100800000100000010010000", "DATA FROG PC07 Twin SNES Adapter",
+    0x0810, 0x0001, 0x0110,
+    2, 1, 3, 0,
+    8, -1, 9,
+    4, 5,
+    -1, -1,
+    -1, -1, -1, -1,
+    0,
+    1, 2, 4, 8,
+    0, 1, 3, 2,
+    0, 0, 0, 0,
+    -1, -1,
+    0, 0,
+    -1, -1,
+    0, 0, 0, 0,
+    0, 0,
+    -1, -1, -1, -1,
+    0, 0, 0, 0,
+    0, 0, 0, 0
+  };
 
 extern void shell_init_with_task(struct bflb_device_s *shell);
 
@@ -200,30 +246,66 @@ const UsbGamepadMap *find_usb_gamepad_map(uint16_t vid,
                                           uint16_t pid,
                                           int version_optional)
 {
-  const UsbGamepadMap *fallback = NULL;
+  /*
+   * Selection order:
+   *   1. exact VID/PID/bcdDevice match,
+   *   2. VID/PID entry with version == 0 (generic/default SDL entry),
+   *   3. first VID/PID entry as a deterministic last-resort fallback.
+   *
+   * The old code only populated fallback when version_optional < 0.  The
+   * normal caller always passes bcdDevice, so a missing exact version could
+   * never fall back and the SDL map was silently disabled.
+   */
+  const UsbGamepadMap *first_vid_pid = NULL;
+  const UsbGamepadMap *version_zero = NULL;
 
   for (size_t i = 0; i < kUsbGamepadMapsCount; i++)
   {
     const UsbGamepadMap *m = &kUsbGamepadMaps[i];
 
-    if (m->vid == vid && m->pid == pid)
-    {
-      if (version_optional >= 0)
-      {
-        if (m->version == (uint16_t)version_optional)
-        {
-          return m; // version hit
-        }
-      }
-      else
-      {
-        if (!fallback)
-          fallback = m;
-      }
-    }
+    if (m->vid != vid || m->pid != pid)
+      continue;
+
+    if (!first_vid_pid)
+      first_vid_pid = m;
+
+    if (!version_zero && m->version == 0)
+      version_zero = m;
+
+    if (version_optional >= 0 &&
+        m->version == (uint16_t)version_optional)
+      return m;
   }
 
-  return fallback;
+  if (version_zero)
+    return version_zero;
+
+  return first_vid_pid;
+}
+
+static void show_map(const UsbGamepadMap *map) {
+  char str0[8], str1[8], str2[8], str3[8];
+
+  if(map->btn_a >= 0) sprintf(str0, " A=%d", map->btn_a); else str0[0] = '\0';
+  if(map->btn_b >= 0) sprintf(str1, " B=%d", map->btn_b); else str1[0] = '\0';
+  if(map->btn_x >= 0) sprintf(str2, " X=%d", map->btn_x); else str2[0] = '\0';
+  if(map->btn_y >= 0) sprintf(str3, " Y=%d", map->btn_y); else str3[0] = '\0';
+  usb_debugf("  buttons:%s%s%s%s", str0, str1, str2, str3);
+
+  if(map->axis_lx >= 0 || map->axis_ly >= 0) {
+    if(map->axis_lx >= 0) sprintf(str0, " LX=%d", map->axis_lx); else str0[0] = '\0';
+    if(map->axis_ly >= 0) sprintf(str1, " LY=%d", map->axis_ly); else str1[0] = '\0';
+    usb_debugf("  analogue axes:%s%s", str0, str1);
+  }
+
+  if(map->dpad_axis_up >= 0 || map->dpad_axis_down >= 0 ||
+     map->dpad_axis_left >= 0 || map->dpad_axis_right >= 0) {
+    if(map->dpad_axis_up >= 0) sprintf(str0, " U=%d", map->dpad_axis_up); else str0[0] = '\0';
+    if(map->dpad_axis_down >= 0) sprintf(str1, " D=%d", map->dpad_axis_down); else str1[0] = '\0';
+    if(map->dpad_axis_left >= 0) sprintf(str2, " L=%d", map->dpad_axis_left); else str2[0] = '\0';
+    if(map->dpad_axis_right >= 0) sprintf(str3, " R=%d", map->dpad_axis_right); else str3[0] = '\0';
+    usb_debugf("  dpad axes:%s%s%s%s", str0, str1, str2, str3);
+  }
 }
 
 void set_led(int pin, int on) {
@@ -246,8 +328,8 @@ static struct usb_config {
     unsigned char last_state;
     unsigned char js_index;
     unsigned char last_state_btn_extra;
-    int16_t last_state_x;
-    int16_t last_state_y;
+    uint8_t last_state_x;
+    uint8_t last_state_y;
 
     struct usb_config *usb;
     SemaphoreHandle_t sem;
@@ -266,7 +348,12 @@ static struct usb_config {
     struct usbh_hid *class;
     uint8_t *buffer;
     int nbytes;
-    hid_report_t report;
+    hid_report_t report[MAX_JS_PER_IFACE];
+    uint8_t report_count;
+    struct usbh_hid_report_info cherry_report;
+    uint16_t input_report_size;
+    bool report_ids_present;
+    bool use_cherry_keyboard;
     struct usb_config *usb;
     SemaphoreHandle_t sem;
     TaskHandle_t task_handle;
@@ -274,14 +361,16 @@ static struct usb_config {
     TickType_t rate_start;
     unsigned long rate_events;
 #endif
-    hid_state_t hid_state;
+    hid_state_t hid_state[MAX_JS_PER_IFACE];
     volatile uint8_t stop;
   } hid_info[CONFIG_USBHOST_MAX_HID_CLASS];
 } usb_config;
 
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t hid_buffer[CONFIG_USBHOST_MAX_HID_CLASS][MAX_REPORT_SIZE];
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE];
-USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t report_desc[CONFIG_USBHOST_MAX_HID_CLASS][128];
+// Report descriptors are fetched and parsed synchronously during enumeration,
+// so one scratch buffer can be reused by every HID interface.
+USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t report_desc[MAX_HID_REPORT_DESC_SIZE];
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t dummy_report[20];
 
 uint8_t byteScaleAnalog(int16_t xbox_val)
@@ -332,18 +421,20 @@ static void xbox_parse(struct xbox_info_S *xbox) {
 
   // build new state
   unsigned char state =
-    ((wButtons & XINPUT_GAMEPAD_DPAD_UP   )?0x08:0x00) |
-    ((wButtons & XINPUT_GAMEPAD_DPAD_DOWN )?0x04:0x00) |
-    ((wButtons & XINPUT_GAMEPAD_DPAD_LEFT )?0x02:0x00) |
-    ((wButtons & XINPUT_GAMEPAD_DPAD_RIGHT)?0x01:0x00) |
+    ((wButtons & XINPUT_GAMEPAD_DPAD_UP) ? 0x08 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_DPAD_DOWN) ? 0x04 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_DPAD_LEFT) ? 0x02 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) ? 0x01 : 0x00) |
     ((wButtons & 0xf000) >> 8); // Y, X, B, A
 
   // build extra button new state
   unsigned char state_btn_extra =
-    ((wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER  )?0x01:0x00) |
-    ((wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER )?0x02:0x00) |
-    ((wButtons & XINPUT_GAMEPAD_BACK           )?0x10:0x00) | // Rumblepad 2 / Dual Action compatibility
-    ((wButtons & XINPUT_GAMEPAD_START          )?0x20:0x00);
+    ((wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) ? 0x01 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 0x02 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_BACK) ? 0x04 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_START) ? 0x08 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_LEFT_THUMB) ? 0x40 : 0x00) |
+    ((wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) ? 0x80 : 0x00);
 
   // build analog stick x,y state
   int16_t sThumbLX = xbox->buffer[7] << 8 | xbox->buffer[6];
@@ -352,21 +443,21 @@ static void xbox_parse(struct xbox_info_S *xbox) {
   uint8_t ay = ~byteScaleAnalog(sThumbLY);
 
   // map analog stick directions to digital
-  if(ax > (uint8_t) 0xc0) state |= 0x01;
-  if(ax < (uint8_t) 0x40) state |= 0x02;
-  if(ay > (uint8_t) 0xc0) state |= 0x04;
-  if(ay < (uint8_t) 0x40) state |= 0x08;
+  if (ax > 0xc0) state |= 0x01;
+  if (ax < 0x40) state |= 0x02;
+  if (ay > 0xc0) state |= 0x04;
+  if (ay < 0x40) state |= 0x08;
 
   // submit if state has changed
   if(state != xbox->last_state ||
     state_btn_extra != xbox->last_state_btn_extra ||
-    sThumbLX != xbox->last_state_x ||
-    sThumbLY != xbox->last_state_y) {
+    ax != xbox->last_state_x ||
+    ay != xbox->last_state_y) {
 
     xbox->last_state = state;
     xbox->last_state_btn_extra = state_btn_extra;
-    xbox->last_state_x = sThumbLX;
-    xbox->last_state_y = sThumbLY;
+    xbox->last_state_x = ax;
+    xbox->last_state_y = ay;
     usb_debugf("XBOX Joy%d: B %02x EB %02x X %02x Y %02x", xbox->js_index, state, state_btn_extra, ax, ay);
 
     if(osd_is_visible()) {	       
@@ -386,6 +477,186 @@ static void xbox_parse(struct xbox_info_S *xbox) {
   }
 }
 
+static bool usbh_hid_prepare_report_info(struct hid_info_S *hid)
+{
+  struct usbh_hid_report_info *report = &hid->cherry_report;
+  uint64_t max_report_bits = 0;
+
+  hid->report_ids_present = false;
+  hid->use_cherry_keyboard = false;
+  for (uint32_t i = 0; i < report->report_item_count; i++) {
+    struct usbh_hid_report_item *item = &report->report_items[i];
+    uint64_t bit_offset = 0;
+
+    if (item->attribute.report_id != 0)
+      hid->report_ids_present = true;
+
+    for (uint32_t j = 0; j < i; j++) {
+      const struct usbh_hid_report_item *previous = &report->report_items[j];
+      if (previous->report_type == item->report_type &&
+          previous->attribute.report_id == item->attribute.report_id) {
+        bit_offset += (uint64_t)previous->attribute.report_size *
+                      previous->attribute.report_count;
+      }
+    }
+
+    if (bit_offset > UINT32_MAX)
+      return false;
+    item->report_bit_offset = (uint32_t)bit_offset;
+
+    if (item->report_type != HID_REPORT_INPUT)
+      continue;
+
+    uint64_t item_end = bit_offset +
+                        (uint64_t)item->attribute.report_size *
+                        item->attribute.report_count;
+    if (item_end > max_report_bits)
+      max_report_bits = item_end;
+
+    if (!(item->report_flags & HID_MAINITEM_CONSTANT) &&
+        item->attribute.usage_page == 0x07)
+      hid->use_cherry_keyboard = true;
+  }
+
+  uint64_t report_size = (max_report_bits + 7) / 8;
+  if (hid->report_ids_present)
+    report_size++;
+  if (report_size == 0 || report_size > MAX_REPORT_SIZE)
+    return false;
+
+  hid->input_report_size = (uint16_t)report_size;
+  return true;
+}
+
+static bool usbh_hid_read_converted_value(
+    const struct usbh_hid_report_item *item, uint32_t scalar,
+    const uint8_t *bytes, uint32_t bytes_len, uint32_t element,
+    uint32_t *value)
+{
+  uint32_t width = item->attribute.report_size;
+  uint64_t first_bit = (uint64_t)element * width;
+
+  if (width == 0 || width > 32)
+    return false;
+
+  *value = 0;
+  for (uint32_t bit = 0; bit < width; bit++) {
+    uint64_t source_bit = first_bit + bit;
+    uint8_t set;
+
+    if (bytes) {
+      if (source_bit >= (uint64_t)bytes_len * 8)
+        return false;
+      set = (bytes[source_bit / 8] >> (source_bit % 8)) & 1;
+    } else {
+      if (source_bit >= 32)
+        return false;
+      set = (scalar >> source_bit) & 1;
+    }
+
+    *value |= (uint32_t)set << bit;
+  }
+  return true;
+}
+
+static void usbh_hid_set_keyboard_usage(uint8_t *modifiers, uint8_t *keys,
+                                        uint16_t usage)
+{
+  if (usage >= 0xe0 && usage <= 0xe7) {
+    *modifiers |= (uint8_t)(1U << (usage - 0xe0));
+  } else if (usage > 3 && usage <= UINT8_MAX) {
+    keys[usage / 8] |= (uint8_t)(1U << (usage % 8));
+  }
+}
+
+static bool usbh_hid_keyboard_report_parse(struct hid_info_S *hid,
+                                           const uint8_t *report_buf,
+                                           uint32_t report_len)
+{
+  uint8_t report_id = hid->report_ids_present ? report_buf[0] : 0;
+  uint8_t modifiers = 0;
+  uint8_t keys[32] = { 0 };
+  uint64_t required_bits = 0;
+  bool has_report = false;
+
+  for (uint32_t i = 0; i < hid->cherry_report.report_item_count; i++) {
+    const struct usbh_hid_report_item *item =
+        &hid->cherry_report.report_items[i];
+    if (item->report_type != HID_REPORT_INPUT ||
+        item->attribute.report_id != report_id)
+      continue;
+
+    has_report = true;
+    uint64_t item_end = (uint64_t)item->report_bit_offset +
+                        (uint64_t)item->attribute.report_size *
+                        item->attribute.report_count;
+    if (item_end > required_bits)
+      required_bits = item_end;
+  }
+
+  if (!has_report)
+    return false;
+
+  uint64_t required_len = (required_bits + 7) / 8;
+  if (hid->report_ids_present)
+    required_len++;
+  if (report_len < required_len)
+    return false;
+
+  bool found_keyboard_data = false;
+  for (uint32_t i = 0; i < hid->cherry_report.report_item_count; i++) {
+    const struct usbh_hid_report_item *item =
+        &hid->cherry_report.report_items[i];
+    if (item->report_type != HID_REPORT_INPUT ||
+        item->attribute.report_id != report_id ||
+        (item->report_flags & HID_MAINITEM_CONSTANT) ||
+        item->attribute.usage_page != 0x07)
+      continue;
+
+    uint32_t scalar = 0;
+    uint8_t *bytes = NULL;
+    uint32_t bytes_len = 0;
+    int ret = usbh_hid_report_convert((struct usbh_hid_report_item *)item,
+                                      report_buf, &scalar, &bytes,
+                                      &bytes_len);
+    if (ret < 0)
+      return false;
+
+    found_keyboard_data = true;
+    bool variable = (item->report_flags & HID_MAINITEM_VARIABLE) != 0;
+    for (uint32_t element = 0;
+         element < item->attribute.report_count; element++) {
+      uint32_t value;
+      if (!usbh_hid_read_converted_value(item, scalar, bytes, bytes_len,
+                                         element, &value))
+        return false;
+      if (value == 0)
+        continue;
+
+      if (variable) {
+        uint16_t usage_min = item->attribute.usage_min;
+        uint16_t usage_max = item->attribute.usage_max;
+        if (usage_min > usage_max || usage_min == UINT16_MAX)
+          continue;
+        uint32_t usage_count = (uint32_t)usage_max - usage_min + 1;
+        uint16_t usage = usage_min +
+                         (element < usage_count ? element : usage_count - 1);
+        usbh_hid_set_keyboard_usage(&modifiers, keys, usage);
+      } else {
+        if (value <= 3)
+          return false;
+        usbh_hid_set_keyboard_usage(&modifiers, keys, (uint16_t)value);
+      }
+    }
+  }
+
+  if (!found_keyboard_data)
+    return false;
+
+  kbd_parse_usage_state(&hid->hid_state[0].kbd, modifiers, keys);
+  return true;
+}
+
 // each HID client gets itws own thread which submits urbs
 // and waits for the interrupt to succeed
 static void usbh_hid_client_thread(void *argument) {
@@ -400,42 +671,54 @@ static void usbh_hid_client_thread(void *argument) {
   usb_debugf("idVendor: 0x%04x          ", vendor_id);
   usb_debugf("idProduct: 0x%04x         ", product_id);
   usb_debugf("bcdDevice(version): 0x%04x         ", version_id);
-  usb_debugf("report type: 0x%04x          ", hid->report.type);
+  usb_debugf("report type: 0x%04x          ", hid->report[0].type);
 
   const UsbGamepadMap *map;
-
-  if (hid->report.type == REPORT_TYPE_JOYSTICK) {
-    usb_debugf("HID client #%d: trying to allocate joystick", hid->index);
-    hid->hid_state.joystick.js_index = hid_allocate_joystick();
-    usb_debugf("  -> joystick %d", hid->hid_state.joystick.js_index);
+  size_t len = hid->use_cherry_keyboard ? hid->input_report_size : 0;
+  if (!hid->use_cherry_keyboard) {
+    for (uint8_t i = 0; i < hid->report_count; i++) {
+      size_t report_len = hid->report[i].report_size +
+          (hid->report[i].report_id_present ? 1 : 0);
+      if (report_len > len)
+        len = report_len;
+    }
+  }
+  if (len == 0 || len > sizeof(hid_buffer[0])) {
+    usb_debugf("HID client #%d: input report too large (%u bytes)",
+               hid->index, (unsigned int)len);
+    hid->task_handle = NULL;
+    vTaskDelete(NULL);
+    return;
   }
 
-  
-  if (hid->report.type == REPORT_TYPE_JOYSTICK)
-  {
+  for (uint8_t i = 0; i < hid->report_count; i++) {
+    if (hid->report[i].type != REPORT_TYPE_JOYSTICK)
+      continue;
 
-    // lookup for VID/PID/Version
+    usb_debugf("HID client #%d: trying to allocate joystick", hid->index);
+    hid->hid_state[i].joystick.js_index = hid_allocate_joystick();
+    usb_debugf("  -> joystick %d", hid->hid_state[i].joystick.js_index);
+
     map = find_usb_gamepad_map(vendor_id, product_id, version_id);
+    if (map) {
+      if (hid->report_count > 1 &&
+          hid->report[1].type == REPORT_TYPE_JOYSTICK &&
+          map->vid == 0x0810 && map->pid == 0x0001)
+        map = &data_frog_pc07;
 
-    if (map)
-    {
       usb_debugf("Found gamepad map: %s (VID=%04x PID=%04x VER=%04x)",
                  map->name, map->vid, map->pid, map->version);
-
-      hid->report.map = map;
-      hid->report.map_found = 1;
-      hid->report.map_checked = 1;
-    }
-    else
-    {
-      usb_debugf("No map for VID=%04x PID=%04x, VERSION=%04x", vendor_id, product_id, version_id);
-      hid->report.map = NULL;
-      hid->report.map_found = 0;
-      hid->report.map_checked = 1;
+      hid->report[i].map = map;
+      hid->report[i].map_found = 1;
+      hid->report[i].map_checked = 1;
+    } else {
+      usb_debugf("No map for VID=%04x PID=%04x, VERSION=%04x",
+                 vendor_id, product_id, version_id);
+      hid->report[i].map = NULL;
+      hid->report[i].map_found = 0;
+      hid->report[i].map_checked = 1;
     }
   }
-
-  size_t len = hid->report.report_size + (hid->report.report_id_present ? 1 : 0);
 
   uint32_t hid_interval_ms;
   if (hid->class->hport->speed == USB_SPEED_HIGH) {
@@ -516,7 +799,22 @@ static void usbh_hid_client_thread(void *argument) {
       break;
 
     if (hid->nbytes > 0) {
-      hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
+      if (hid->use_cherry_keyboard)
+        usbh_hid_keyboard_report_parse(hid, hid->buffer, hid->nbytes);
+      else if (!hid->report[0].report_id_present)
+        hid_parse(&hid->report[0], &hid->hid_state[0],
+                  hid->buffer, hid->nbytes);
+      else if (hid->nbytes > 0) {
+        for (uint8_t i = 0; i < hid->report_count; i++) {
+          uint16_t report_len = hid->report[i].report_size +
+              (hid->report[i].report_id_present ? 1 : 0);
+          if (hid->report[i].report_id_present &&
+              hid->buffer[0] == hid->report[i].report_id &&
+              (size_t)hid->nbytes >= report_len)
+            hid_parse(&hid->report[i], &hid->hid_state[i],
+                      hid->buffer, report_len);
+        }
+      }
     }
 
     hid->nbytes = 0;
@@ -534,9 +832,11 @@ static void usbh_hid_client_thread(void *argument) {
   }
 
   usb_debugf("HID client #%d: stopping", hid->index);
-  if (hid->hid_state.joystick.js_index != NO_JOYSTICK) {
-    hid_release_joystick(hid->hid_state.joystick.js_index);
-    hid->hid_state.joystick.js_index = NO_JOYSTICK;
+  for (uint8_t i = 0; i < hid->report_count; i++) {
+    if (hid->hid_state[i].joystick.js_index != NO_JOYSTICK) {
+      hid_release_joystick(hid->hid_state[i].joystick.js_index);
+      hid->hid_state[i].joystick.js_index = NO_JOYSTICK;
+    }
   }
   hid->task_handle = NULL;
   vTaskDelete(NULL);
@@ -628,6 +928,8 @@ int xpad_start_xbox_360(struct usbh_hubport *hport, uint8_t *buffer) {
   setup->wLength = 0x04;
   if ((ret = usbh_control_transfer(hport, setup, buffer)) < 0)
       usb_debugf("XBOX: init packet #3 failed", ret);
+
+  return 0;
 }
 
 // ... and XBOX clients as well
@@ -673,6 +975,7 @@ static void usbh_xbox_client_thread(void *argument) {
   if (map) {
     usb_debugf("Found gamepad map: %s (VID=%04x PID=%04x VER=%04x)",
                 map->name, map->vid, map->pid, map->version);
+    show_map(map);
 
     xbox->report.map = map;
     xbox->report.map_found = 1;
@@ -781,9 +1084,23 @@ void usbh_hid_run(struct usbh_hid *hid_class)
     usb->hid_info[i].class = hid_class;
 
     usb_debugf("NEW HID %d", i);
-    memset(&usb->hid_info[i].report, 0, sizeof(usb->hid_info[i].report));
+    struct hid_info_S *hid = &usb->hid_info[i];
+    memset(hid->report, 0, sizeof(hid->report));
+    memset(hid->hid_state, 0, sizeof(hid->hid_state));
+    memset(&hid->cherry_report, 0, sizeof(hid->cherry_report));
+    hid->report_count = 0;
+    for (uint8_t report = 0; report < MAX_JS_PER_IFACE; report++)
+      hid->hid_state[report].joystick.js_index = NO_JOYSTICK;
 
-    uint16_t rep_desc = usbh_hid_get_report_descriptor(hid_class, report_desc[i], 1024);
+    if (hid_class->report_size > sizeof(report_desc)) {
+      usb_debugf("HID report descriptor too large (%u bytes)",
+                 hid_class->report_size);
+      usb->hid_info[i].state = STATE_FAILED;
+      return;
+    }
+
+    int rep_desc = usbh_hid_get_report_descriptor(
+      hid_class, report_desc, hid_class->report_size);
     if (rep_desc < 0)
     {
       usb_debugf("usbh_hid_get_report_descriptor issue");
@@ -791,8 +1108,49 @@ void usbh_hid_run(struct usbh_hid *hid_class)
       return;
     }
 
-    if (!parse_report_descriptor(report_desc[i], (uint16_t)rep_desc, &usb->hid_info[i].report, NULL))
-    {
+    // Some device return broken hid descriptor reports. Just like the Linux
+    // kernel we replace these.
+    fix_report_descriptor(hid_class->hport->device_desc.idVendor,
+			  hid_class->hport->device_desc.idProduct,
+			  hid_class->hport->device_desc.bcdDevice,
+              report_desc, hid_class->report_size);
+
+    uint16_t report_bytes = 0;
+    bool project_report_parsed = parse_report_descriptor(
+        report_desc, hid_class->report_size, &hid->report[0], &report_bytes);
+    if (project_report_parsed) {
+      hid->report_count = 1;
+      if (hid->report[0].type == REPORT_TYPE_JOYSTICK &&
+          report_bytes < hid_class->report_size) {
+        uint16_t second_report_bytes = 0;
+        if (parse_report_descriptor(report_desc + report_bytes,
+                                    hid_class->report_size - report_bytes,
+                                    &hid->report[1], &second_report_bytes) &&
+            hid->report[1].type == REPORT_TYPE_JOYSTICK) {
+          hid->report_count = 2;
+          usb_debugf("Found second joystick report descriptor");
+        }
+      }
+    }
+    int cherry_parse_result = usbh_hid_parse_report_descriptor(
+    report_desc, hid_class->report_size,
+        &usb->hid_info[i].cherry_report);
+    if (cherry_parse_result == 0 &&
+        usbh_hid_prepare_report_info(&usb->hid_info[i])) {
+      if (usb->hid_info[i].use_cherry_keyboard)
+        usb->hid_info[i].report[0].type = REPORT_TYPE_KEYBOARD;
+    }
+    if (usb->hid_info[i].use_cherry_keyboard)
+      usb->hid_info[i].report_count = 1;
+  
+    if (!usb->hid_info[i].use_cherry_keyboard && !project_report_parsed) {
+      usb->hid_info[i].state = STATE_FAILED;
+      return;
+    }
+
+    if (usb->hid_info[i].report[0].type == REPORT_TYPE_KEYBOARD &&
+        !usb->hid_info[i].use_cherry_keyboard) {
+      usb_debugf("HID keyboard report descriptor is unsupported");
       usb->hid_info[i].state = STATE_FAILED;
       return;
     }
@@ -810,10 +1168,15 @@ void usbh_hid_stop(struct usbh_hid *hid_class)
   uint8_t i = hid_class->minor;
   usb_config.hid_info[i].stop = 1;
 
-  if (usb_config.hid_info[i].hid_state.joystick.js_index != NO_JOYSTICK)
-  {
-    hid_release_joystick(usb_config.hid_info[i].hid_state.joystick.js_index);
-    usb_config.hid_info[i].hid_state.joystick.js_index = NO_JOYSTICK;
+  for (uint8_t report = 0;
+       report < usb_config.hid_info[i].report_count; report++) {
+    if (usb_config.hid_info[i].hid_state[report].joystick.js_index !=
+        NO_JOYSTICK) {
+      hid_release_joystick(
+          usb_config.hid_info[i].hid_state[report].joystick.js_index);
+      usb_config.hid_info[i].hid_state[report].joystick.js_index =
+          NO_JOYSTICK;
+    }
   }
 }
 
@@ -831,9 +1194,14 @@ void usbh_xbox_run(struct usbh_xbox *xbox_class) {
 
     usb_debugf("NEW XBOX HID %d", i);
     memset(&usb->xbox_info[i].report, 0, sizeof(usb->xbox_info[i].report));
+    usb->xbox_info[i].last_state = 0;
+    usb->xbox_info[i].last_state_btn_extra = 0;
+    usb->xbox_info[i].last_state_x = 0;
+    usb->xbox_info[i].last_state_y = 0;
+    usb->xbox_info[i].js_index = hid_allocate_joystick();
 
 #if 0   // don't try to read HID report descriptor as it's not used/parsed, anyway
-    uint16_t rep_desc = usbh_hid_get_report_descriptor(xbox_class, report_desc[i], 1024);
+  int rep_desc = usbh_hid_get_report_descriptor(xbox_class, report_desc, 1024);
     if (rep_desc < 0) {
       usb_debugf("usbh_hid_get_report_descriptor issue");
       usb->xbox_info[i].state = STATE_FAILED;
@@ -852,6 +1220,11 @@ void usbh_xbox_run(struct usbh_xbox *xbox_class) {
 void usbh_xbox_stop(struct usbh_xbox *xbox_class) {
   uint8_t i = xbox_class->minor;
   usb_config.xbox_info[i].stop = 1;
+
+  if (usb_config.xbox_info[i].js_index != NO_JOYSTICK) {
+    hid_release_joystick(usb_config.xbox_info[i].js_index);
+    usb_config.xbox_info[i].js_index = NO_JOYSTICK;
+  }
 }
 
 static struct bflb_device_s *usb_dev;
@@ -879,12 +1252,13 @@ void usb_host(void) {
   for(int i=0;i<CONFIG_USBHOST_MAX_XBOX_CLASS;i++) {
     usb_config.xbox_info[i].index = i;
     usb_config.xbox_info[i].state = 0;
-    usb_config.xbox_info[i].buffer = xbox_buffer[i];      
+    usb_config.xbox_info[i].js_index = NO_JOYSTICK;
+    usb_config.xbox_info[i].buffer = xbox_buffer[i];
     usb_config.xbox_info[i].usb = &usb_config;
     usb_config.xbox_info[i].sem = xSemaphoreCreateBinary();
   }
 
-  usbh_initialize(0, usb_dev->reg_base);
+  usbh_initialize(0, usb_dev->reg_base, NULL);
 }
 
 uint8_t usbh_get_hport_active_config_index(struct usbh_hubport *hport)
@@ -912,6 +1286,12 @@ static struct bflb_device_s *spi_dev;
   #define SPI_PIN_SCK   GPIO_PIN_1  /* out SPI_SCLK */
   #define SPI_PIN_MISO  GPIO_PIN_2  /* in  SPI_DIR, CHIP_EN, 10K PD*/
   #define SPI_PIN_MOSI  GPIO_PIN_3  /* out SPI_DAT */
+  #define SPI_PIN_IRQ   GPIO_PIN_13 /* in  UART RX, crossed */
+#elif defined(TANG_NANO20K_V3923)
+  #define SPI_PIN_CSN   GPIO_PIN_0  /* out SPI_CSn */
+  #define SPI_PIN_SCK   GPIO_PIN_1  /* out SPI_SCLK */
+  #define SPI_PIN_MISO  GPIO_PIN_30 /* in  SPI_DIR */
+  #define SPI_PIN_MOSI  GPIO_PIN_27 /* out SPI_DAT */
   #define SPI_PIN_IRQ   GPIO_PIN_13 /* in  UART RX, crossed */
 #elif defined(TANG_CONSOLE60K)
   #define SPI_PIN_CSN   GPIO_PIN_0 /* out TMS */
@@ -1041,6 +1421,12 @@ extern uint32_t __HeapLimit;
 extern uint32_t _heap_wifi_start;
 extern uint32_t _heap_wifi_size;
 
+static const uint32_t any_alloc_order[] = {
+    MM_HEAP_OCRAM_0,
+    MM_HEAP_PSRAM_0,
+    MM_HEAP_WRAM_0,
+};
+
 extern void bl_show_flashinfo(void);
 extern void bl_show_log(void);
 extern void bl_show_component_version(void);
@@ -1141,7 +1527,20 @@ static void console_init() {
 #endif
 }
 
+#ifdef CONFIG_HIGH_ISR_STACK
+void bflb_wfa_init(void)
+{
+    extern void interrupt1_handler(void);
+    bflb_irq_attach(MAC_INT_PROT_TRIGGER_IRQn, (irq_callback)interrupt1_handler, NULL);
+    bflb_irq_enable(MAC_INT_PROT_TRIGGER_IRQn);
+    extern void csi_vic_set_prio(int32_t IRQn, uint32_t priority);
+    csi_vic_set_prio(MAC_INT_PROT_TRIGGER_IRQn, 2);
+}
+#endif
+
 static void wifi_init(void);
+static void sntp_enable_dhcp_servers(void);
+static void sntp_start_from_task(void);
 
 // local board_init used as a replacemement for global board_init
 static void mn_board_init(void) {
@@ -1153,7 +1552,14 @@ static void mn_board_init(void) {
     /* lock */
     flag = bflb_irq_save();
 
+#ifndef CONFIG_BOARD_FLASH_INIT_SKIP
+    /* flash init */
     ret = bflb_flash_init();
+#ifndef CONFIG_BOARD_FLASH_LOW_SPEED
+    /* flash clock frequency increased to 80MHz */
+    board_set_flash_80m();
+#endif
+#endif
 
     /* system clock */
     system_clock_init();
@@ -1167,6 +1573,9 @@ static void mn_board_init(void) {
     extern void interrupt0_handler(void);
     bflb_irq_attach(WIFI_IRQn, (irq_callback)interrupt0_handler, NULL);
     bflb_irq_enable(WIFI_IRQn);
+#endif
+#ifdef CONFIG_HIGH_ISR_STACK
+    bflb_wfa_init();
 #endif
 
     gpio = bflb_device_get_by_name("gpio");
@@ -1207,6 +1616,8 @@ static void mn_board_init(void) {
     debugf("\r\ndynamic memory init success");
     debugf("ocram heap size: %d Kbyte",((size_t)&__HeapLimit - (size_t)&__HeapBase) / 1024);
 
+    mm_heap_set_any_alloc_order(any_alloc_order, sizeof(any_alloc_order) / sizeof(any_alloc_order[0]));
+
     /* boot info dump */
     bl_show_log();
     /* version info dump */
@@ -1232,10 +1643,7 @@ static void mn_board_init(void) {
     rtc = bflb_device_get_by_name("rtc");
 #endif
 
-#ifdef CONFIG_MBEDTLS
-    extern void bflb_sec_mutex_init(void);
     bflb_sec_mutex_init();
-#endif
 
     /* unlock */
     bflb_irq_restore(flag);
@@ -1244,13 +1652,6 @@ static void mn_board_init(void) {
     debugf("===========================");
 }
 
-void shell_task_runner(void *param)
-{
-  vTaskDelay(pdMS_TO_TICKS(5000));
-  shell_exe_cmd((unsigned char*)"lsusb -v\r\n", strlen("lsusb -v\r\n"));
-  vTaskDelay(pdMS_TO_TICKS(100));
-  vTaskDelete( NULL );
-}
 
 void mcu_hw_init(void) {
   mn_board_init();
@@ -1266,7 +1667,7 @@ void mcu_hw_init(void) {
   // both leds off
   bflb_gpio_set(gpio, GPIO_PIN_27);
   bflb_gpio_set(gpio, GPIO_PIN_28);
-#elif defined(TANG_NANO20K)
+#elif defined(TANG_NANO20K)|| defined(TANG_NANO20K_V3923)
   /* configure JTAGSEL_n */
 #elif defined(TANG_MEGA138KPRO)
   /* LED6 enable */
@@ -1302,11 +1703,8 @@ void mcu_hw_init(void) {
   shell_init_with_task(uart0);
 #endif
 
-#ifdef M0S_DOCK
-  wifi_init();
-#elif TANG_CONSOLE60K
-  wifi_init();
-#elif TANG_MEGA60K
+  tcpip_init(NULL, NULL);
+#if defined(M0S_DOCK)|| defined(TANG_CONSOLE60K)|| defined(TANG_MEGA60K)
   wifi_init();
 #endif
 
@@ -1315,7 +1713,6 @@ void mcu_hw_init(void) {
 #endif
   usb_host();
 
-  xTaskCreate(shell_task_runner, "runner", 2048, NULL, 5, NULL);
 }
 
 void stop_hid(void) {
@@ -1406,9 +1803,141 @@ void mcu_hw_port_byte(unsigned char byte) {
 }
 
 extern int wifi_mgmr_task_start(void);
-extern int fhost_init(void);
 extern int wifi_mgmr_sta_scanlist(void);
-extern int wifi_mgmr_sta_quickconnect(const char *ssid, const char *key, uint16_t freq1, uint16_t freq2);
+
+// the network connection state
+#define NETWORK_STATUS_UNINITIALIZED        (0)
+#define NETWORK_STATUS_TCPIP_INIT         (1<<0) // lwip has been initialized
+#define NETWORK_STATUS_WIFI               (1<<1) // current setup is wifi based
+#define NETWORK_STATUS_UP                 (1<<2) // wifi connected or ethernet up
+#define NETWORK_STATUS_HAS_ADDR           (1<<3) // IP address is valid
+#define NETWORK_STATUS_SNTP_STARTED       (1<<4) // sntp app is running
+#define NETWORK_STATUS_TCP_CONNECTED      (1<<5) // the at wifi tcp connection is established
+#define NETWORK_STATUS_WIFI_AUTO          (1<<6) // WiFi started from config file (no serial AT-WiFi IO)
+#define USB_ETH_RX_TASK_STACK_SIZE         1024
+#define NETWORK_LINK_TASK_STACK_SIZE       512
+
+static uint8_t network_status = NETWORK_STATUS_UNINITIALIZED;
+
+enum network_interface {
+  NETWORK_INTERFACE_NONE,
+  NETWORK_INTERFACE_WIFI,
+  NETWORK_INTERFACE_RTL8152,
+  NETWORK_INTERFACE_ASIX
+};
+
+static enum network_interface active_network_interface = NETWORK_INTERFACE_NONE;
+static enum network_interface active_usb_network_interface = NETWORK_INTERFACE_NONE;
+static struct netif *active_network_netif = NULL;
+static struct usbh_rtl8152 *active_rtl8152 = NULL;
+static struct usbh_asix *active_asix = NULL;
+static TaskHandle_t network_link_task = NULL;
+static TimerHandle_t dhcp_handle = NULL;
+
+static bool network_uses_dhcp(void)
+{
+  return inifile_config_get_int("network", "mode", 1) == 1;
+}
+
+static void network_get_static_ipv4(ip4_addr_t *ipaddr, ip4_addr_t *netmask,
+                                    ip4_addr_t *gateway)
+{
+  ip4_addr_set_u32(ipaddr,
+                   htonl(inifile_config_get_ip("network", "ip", 0xc0a80002)));
+  ip4_addr_set_u32(netmask,
+                   htonl(inifile_config_get_ip("network", "mask", 0xffffff00)));
+  ip4_addr_set_u32(gateway,
+                   htonl(inifile_config_get_ip("network", "gw", 0xc0a80001)));
+}
+
+static void network_set_static_dns_callback(void *arg)
+{
+  (void)arg;
+
+  ip_addr_t dns;
+  ip_addr_set_ip4_u32(&dns,
+                      htonl(inifile_config_get_ip("network", "dns", 0)));
+  dns_setserver(0, &dns);
+}
+
+static void network_apply_static_dns(void)
+{
+  if (!inifile_config_has("network", "dns"))
+    return;
+
+  if (tcpip_callback_with_block(network_set_static_dns_callback, NULL, 1) !=
+      ERR_OK)
+    debugf("Failed to apply static DNS configuration");
+}
+
+static void network_apply_static_ipv4(struct netif *netif)
+{
+  ip4_addr_t ipaddr, netmask, gateway;
+  network_get_static_ipv4(&ipaddr, &netmask, &gateway);
+  if (netifapi_netif_set_addr(netif, &ipaddr, &netmask, &gateway) != ERR_OK) {
+    debugf("Failed to apply static network configuration");
+    return;
+  }
+
+  network_apply_static_dns();
+
+  if (!(network_status & NETWORK_STATUS_HAS_ADDR))
+    menu_notify_ip(ip4addr_ntoa(&ipaddr));
+  network_status |= NETWORK_STATUS_HAS_ADDR;
+}
+
+#define SNTP_FALLBACK_SERVER "pool.ntp.org"
+
+static void sntp_configure_servers(void)
+{
+  bool has_configured_servers = inifile_config_has("ntp", "ip");
+
+  if (has_configured_servers) {
+    for (int i = 0; i < inifile_config_num_values("ntp", "ip"); i++) {
+      ip_addr_t server;
+      ip_addr_set_ip4_u32(&server,
+                          htonl(inifile_config_get_ip_n("ntp", "ip", 0, i)));
+      sntp_setserver(i, &server);
+    }
+  }
+
+  sntp_servermode_dhcp(!has_configured_servers);
+}
+
+static void sntp_enable_dhcp_servers_callback(void *arg)
+{
+  (void)arg;
+  sntp_configure_servers();
+}
+
+static void sntp_enable_dhcp_servers(void)
+{
+  tcpip_callback_with_block(sntp_enable_dhcp_servers_callback, NULL, 1);
+}
+
+static void sntp_start_callback(void *arg)
+{
+  (void)arg;
+  if (!(network_status & NETWORK_STATUS_SNTP_STARTED)) {
+    network_status |= NETWORK_STATUS_SNTP_STARTED;
+    sntp_configure_servers();
+#if SNTP_SERVER_DNS
+    if (ip_addr_isany(sntp_getserver(0)) && sntp_getservername(0) == NULL)
+      sntp_setservername(0, SNTP_FALLBACK_SERVER);
+#endif
+    sntp_init();
+  }
+}
+
+static void sntp_start_from_task(void)
+{
+  tcpip_callback_with_block(sntp_start_callback, NULL, 0);
+}
+
+uint8_t mcu_hw_network_status(void)
+{
+  return network_status;
+}
 
 #define WIFI_STACK_SIZE  (1536)
 #define TASK_PRIORITY_FW (16)
@@ -1420,11 +1949,143 @@ extern int wifi_mgmr_sta_quickconnect(const char *ssid, const char *key, uint16_
 #define WIFI_STATE_CONNECTED    3
 
 static int wifi_state = WIFI_STATE_UNKNOWN;
+static volatile bool wifi_manager_ready = false;
+static volatile bool wifi_auto_connect_pending = false;
+static bool wifi_auto_connect_started = false;
 
 static char *wifi_ssid = NULL;
 static char *wifi_key = NULL;
 static int s_retry_num = 0;
 static QueueHandle_t wifi_event_queue = NULL;
+static uint32_t wifi_reported_ip = 0;
+static void wifi_auto_connect_start_if_ready(void);
+
+static void wifi_auto_connect_task(void *param)
+{
+  (void)param;
+  char *ssid = inifile_config_get_str("wifi", "ssid");
+  char *key = inifile_config_get_str("wifi", "pass");
+
+  if (!ssid || !key) {
+    debugf("No WiFi setup");
+    network_status &= ~NETWORK_STATUS_WIFI_AUTO;
+    wifi_auto_connect_started = false;
+    vTaskDelete(NULL);
+    return;
+  }
+
+  network_status |= NETWORK_STATUS_WIFI_AUTO;
+  debugf("Connecting to WiFi '%s'", ssid);
+  if (!mcu_hw_wifi_connect(ssid, key)) {
+    debugf("WiFi auto-connect failed");
+    network_status &= ~NETWORK_STATUS_WIFI_AUTO;
+    wifi_auto_connect_started = false;
+    wifi_auto_connect_start_if_ready();
+  }
+  vTaskDelete(NULL);
+}
+
+static void wifi_auto_connect_start_if_ready(void)
+{
+  if (!wifi_auto_connect_pending || !wifi_manager_ready ||
+      wifi_auto_connect_started)
+    return;
+  if (active_network_interface == NETWORK_INTERFACE_RTL8152 ||
+      active_network_interface == NETWORK_INTERFACE_ASIX)
+    return;
+
+  wifi_auto_connect_pending = false;
+  wifi_auto_connect_started = true;
+  if (xTaskCreate(wifi_auto_connect_task, "wifi auto", 1024, NULL,
+                  TASK_PRIORITY_FW, NULL) != pdPASS) {
+    wifi_auto_connect_started = false;
+    network_status &= ~NETWORK_STATUS_WIFI_AUTO;
+    debugf("Failed to start WiFi auto-connect task");
+  }
+}
+
+static int wifi_connect_with_network_config(const char *ssid, const char *key)
+{
+  wifi_mgmr_sta_connect_params_t params = {0};
+  size_t ssid_len = strlen(ssid);
+  size_t key_len = strlen(key);
+
+  if (ssid_len > sizeof(params.ssid) || key_len > sizeof(params.key)) {
+    debugf("WiFi credentials exceed supported length");
+    return -1;
+  }
+
+  memcpy(params.ssid, ssid, ssid_len);
+  memcpy(params.key, key, key_len);
+  params.ssid_len = (uint8_t)ssid_len;
+  params.key_len = (uint8_t)key_len;
+  params.use_dhcp = network_uses_dhcp();
+  params.quick_connect = 1;
+
+  return wifi_mgmr_sta_connect(&params);
+}
+
+void mcu_hw_wifi_auto_connect(void)
+{
+  if (!inifile_config_has("wifi", "ssid") ||
+      !inifile_config_has("wifi", "pass")) {
+    debugf("No WiFi setup");
+    return;
+  }
+
+  wifi_auto_connect_pending = true;
+  wifi_auto_connect_start_if_ready();
+}
+
+static void wifi_got_ip(const ip4_addr_t *ip, bool force_notify)
+{
+  if (active_network_interface != NETWORK_INTERFACE_NONE &&
+      active_network_interface != NETWORK_INTERFACE_WIFI) {
+    debugf("WiFi: got IP ignored; active interface is %d",
+           active_network_interface);
+    return;
+  }
+
+  active_network_interface = NETWORK_INTERFACE_WIFI;
+  if (force_notify || wifi_reported_ip != ip->addr) {
+    const char *ipaddr = ip4addr_ntoa(ip);
+    debugf("WiFi: got IP %s, notifying OSD", ipaddr);
+    menu_notify_ip(ipaddr);
+    wifi_reported_ip = ip->addr;
+  }
+  network_status |= NETWORK_STATUS_WIFI | NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR;
+  sntp_start_from_task();
+}
+
+static void wifi_lost_ip(void)
+{
+  if (active_network_interface != NETWORK_INTERFACE_WIFI)
+    return;
+
+  active_network_interface = NETWORK_INTERFACE_NONE;
+  wifi_reported_ip = 0;
+  network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR |
+                      NETWORK_STATUS_TCP_CONNECTED);
+  menu_notify_network_disconnected();
+  unsigned char evt = 2;
+  xQueueSendFromISR(wifi_event_queue, &evt, 0);
+}
+
+static void wifi_ip_monitor(void *arg)
+{
+  (void)arg;
+
+  for (;;) {
+    ip4_addr_t ip, gw, mask, dns;
+    wifi_sta_ip4_addr_get(&ip.addr, &mask.addr, &gw.addr, &dns.addr);
+    if (wifi_mgmr_sta_state_get() != 1 || ip4_addr_isany_val(ip)) {
+      wifi_lost_ip();
+    } else {
+      wifi_got_ip(&ip, false);
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
 
 void wifi_event_handler(async_input_event_t ev, void *priv)
 {
@@ -1437,6 +2098,8 @@ void wifi_event_handler(async_input_event_t ev, void *priv)
   } break;
   case CODE_WIFI_ON_MGMR_DONE: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_MGMR_DONE", __func__);
+    wifi_manager_ready = true;
+    wifi_auto_connect_start_if_ready();
   } break;
   case CODE_WIFI_ON_SCAN_DONE: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_SCAN_DONE", __func__);
@@ -1446,18 +2109,46 @@ void wifi_event_handler(async_input_event_t ev, void *priv)
   } break;
   case CODE_WIFI_ON_CONNECTED: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_CONNECTED", __func__);
+    if (active_network_interface != NETWORK_INTERFACE_NONE &&
+        active_network_interface != NETWORK_INTERFACE_WIFI) {
+      break;
+    }
+    /*
+     * Do not mark WiFi as the active interface on plain association.
+     * A WiFi link without an IP address should not block USB Ethernet,
+     * which may already be up and have a valid IPv4 lease.
+     */
+    network_status |= NETWORK_STATUS_WIFI;
+    bool static_ip_applied = false;
+    if (!network_uses_dhcp()) {
+      ip4_addr_t ipaddr, netmask, gateway;
+      network_get_static_ipv4(&ipaddr, &netmask, &gateway);
+      if (wifi_mgmr_sta_ip_set(ipaddr.addr, netmask.addr, gateway.addr, 0) == 0) {
+        network_apply_static_dns();
+        wifi_got_ip(&ipaddr, true);
+        static_ip_applied = true;
+      } else {
+        debugf("Failed to apply static WiFi network configuration");
+      }
+    }
     unsigned char evt = 3; 
     xQueueSendFromISR(wifi_event_queue, &evt, 0);
+    if (static_ip_applied) {
+      unsigned char static_ip_evt = 4;
+      xQueueSendFromISR(wifi_event_queue, &static_ip_evt, 0);
+    }
   } break;
   case CODE_WIFI_ON_GOT_IP: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_GOT_IP", __func__);
+    ip4_addr_t ip, gw, mask, dns;
+    wifi_sta_ip4_addr_get(&ip.addr, &mask.addr, &gw.addr, &dns.addr);
+    wifi_got_ip(&ip, true);
     unsigned char evt = 4; 
     xQueueSendFromISR(wifi_event_queue, &evt, 0);
   } break;
   case CODE_WIFI_ON_DISCONNECT: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_DISCONNECT", __func__);
-    unsigned char evt = 2; 
-    xQueueSendFromISR(wifi_event_queue, &evt, 0);
+    wifi_lost_ip();
   } break;
   case CODE_WIFI_ON_AP_STARTED: {
     debugf("[APP] [EVT] %s, CODE_WIFI_ON_AP_STARTED", __func__);
@@ -1479,8 +2170,10 @@ void wifi_event_handler(async_input_event_t ev, void *priv)
 void wifi_start_firmware_task(void *param)
 {
     /* network init */
-    tcpip_init(NULL, NULL);
+    network_status |= NETWORK_STATUS_TCPIP_INIT | NETWORK_STATUS_WIFI;
     debugf("Starting wifi ...");
+
+    sntp_enable_dhcp_servers();
 
     if (0 != rfparam_init(0, NULL, 0)) {
       debugf("PHY RF init failed!");
@@ -1507,6 +2200,7 @@ static void wifi_init(void) {
   bflb_irq_enable(WIFI_IRQn);
 
   xTaskCreate(wifi_start_firmware_task, "wifi init", 1024, NULL, 10, NULL);
+  xTaskCreate(wifi_ip_monitor, "wifi ip", 1024, NULL, 10, NULL);
 }
 
 static void wait4event(char code, char code2) {
@@ -1524,12 +2218,14 @@ static void wait4event(char code, char code2) {
           debugf("  -> disconnect");
           if (s_retry_num < 10) {
             // connect
-            wifi_mgmr_sta_quickconnect(wifi_ssid, wifi_key, 0, 0);
+            wifi_connect_with_network_config(wifi_ssid, wifi_key);
             s_retry_num++;
             debugf("retry to connect to the AP");
-            at_wifi_puts(".");
+            if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+              at_wifi_puts(".");
           } else {
-            at_wifi_puts("\r\nConnection failed!\r\n");
+            if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+              at_wifi_puts("\r\nConnection failed!\r\n");
             debugf("finally failed");
           }	
           break;
@@ -1538,7 +2234,8 @@ static void wait4event(char code, char code2) {
           break;
         case 4:
           debugf("  -> got ip");
-          at_wifi_puts("\r\nConnected\r\n");
+          if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+            at_wifi_puts("\r\nConnected\r\n");
           break;	
         case 5:
           debugf("  -> init done");
@@ -1566,7 +2263,7 @@ static const char *auth_mode_str(int authmode) {
 
   int i;
   for(i=0;mode_str[i].mode != -1;i++)
-    if(mode_str[i].mode == authmode || mode_str[i].mode == -1)
+    if(mode_str[i].mode == authmode)
       return mode_str[i].str;
 
   return mode_str[i].str;
@@ -1583,13 +2280,26 @@ static void wifi_scan_item_cb(void *env, void *arg, wifi_mgmr_scan_item_t *item)
 }  
 
 void mcu_hw_wifi_scan(void) {
+  if (!(network_status & NETWORK_STATUS_TCPIP_INIT) ||
+      !(network_status & NETWORK_STATUS_WIFI)) {
+    if (!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+      debugf("Ignoring WiFi command since TCP stack is not initialized");
+      at_wifi_puts("TCPIP not available\r\n");
+    } else {
+      debugf("Ignoring WiFi command since network hardware is not WiFi");
+      at_wifi_puts("WiFi not available\r\n");
+    }
+    return;
+  }
+
   debugf("WiFi: Performing scan");
 
   static wifi_mgmr_scan_params_t config;
+  memset(&config, 0, sizeof(wifi_mgmr_scan_params_t));
+
   /* duration in microseconds for which channel is scanned, default 220000 */
   config.duration = 220000;
 
-  memset(&config, 0, sizeof(wifi_mgmr_scan_params_t));
   if (0 != wifi_mgmr_sta_scan(&config)) {
     at_wifi_puts("Scan failed\r\n");
     return;
@@ -1633,10 +2343,26 @@ static void wifi_info()
 
 }
 
-void mcu_hw_wifi_connect(char *ssid, char *key) {
-  debugf("WiFI: connect to %s/%s", ssid, key);
+bool mcu_hw_wifi_connect(char *ssid, char *key) {
+  if (active_network_interface == NETWORK_INTERFACE_RTL8152 ||
+      active_network_interface == NETWORK_INTERFACE_ASIX) {
+    debugf("Ignoring WiFi command since USB Ethernet is active");
+    if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+      at_wifi_puts("WiFi not available\r\n");
+    return false;
+  }
+
+  if (!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+    debugf("Ignoring WiFi command since TCP stack is not initialized");
+    if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+      at_wifi_puts("TCPIP not available\r\n");
+    return false;
+  }
+
+  debugf("WiFi: connect to '%s'", ssid);
   
-  at_wifi_puts("WiFI: Connecting...");
+  if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+    at_wifi_puts("WiFI: Connecting...");
   if(wifi_ssid) free(wifi_ssid);
   if(wifi_key) free(wifi_key);
 
@@ -1649,18 +2375,51 @@ void mcu_hw_wifi_connect(char *ssid, char *key) {
   wifi_key = strdup(key);
   
   s_retry_num = 0;
-  if (0 != wifi_mgmr_sta_quickconnect(wifi_ssid, wifi_key, 0, 0)) {
+  if (0 != wifi_connect_with_network_config(wifi_ssid, wifi_key)) {
     debugf("\r\nWiFI: STA failed!");
+    if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+      at_wifi_puts("\r\nWiFI: Connection failed!\r\n");
+    return false;
   } else {
     wait4event(4, 4);
-    if (wifi_mgmr_sta_state_get() == 1 ) {
-      at_wifi_puts("\r\nWiFI: Connected\r\n");
-      wifi_info();
+    if (wifi_mgmr_sta_state_get() == 1 && (network_status & NETWORK_STATUS_HAS_ADDR)) {
+      active_network_interface = NETWORK_INTERFACE_WIFI;
+      network_status |= NETWORK_STATUS_TCPIP_INIT | NETWORK_STATUS_WIFI | NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR;
+      if (!(network_status & NETWORK_STATUS_WIFI_AUTO)) {
+        at_wifi_puts("\r\nWiFI: Connected\r\n");
+        wifi_info();
+      }
     } else {
       debugf("\r\nWiFI: Connection failed!");
-      at_wifi_puts("\r\nWiFI: Connection failed!\r\n");
+      if (!(network_status & NETWORK_STATUS_WIFI_AUTO))
+        at_wifi_puts("\r\nWiFI: Connection failed!\r\n");
+      network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR | NETWORK_STATUS_TCP_CONNECTED);
+      if (active_network_interface == NETWORK_INTERFACE_WIFI)
+        active_network_interface = NETWORK_INTERFACE_NONE;
+
+      return false;
       }
     }
+  return true;
+}
+
+static bool network_available(void) {
+  // Require TCP/IP init and either a link-up indication or a valid IP address.
+  if(!(network_status & NETWORK_STATUS_TCPIP_INIT) ||
+     !((network_status & NETWORK_STATUS_UP) ||
+       (network_status & NETWORK_STATUS_HAS_ADDR))) {
+
+    if(!(network_status & NETWORK_STATUS_TCPIP_INIT)) {
+      debugf("Ignoring command since TCP stack is not initialized");
+      at_wifi_puts("TCPIP not available\r\n");
+    } else if(!((network_status & NETWORK_STATUS_UP) ||
+                (network_status & NETWORK_STATUS_HAS_ADDR))) {
+      debugf("Ignoring command since network is down or disconnected");
+      at_wifi_puts("Network not available\r\n");
+    }    
+    return false;
+  }  
+  return true;
 }
 
 static struct tcp_pcb *tcp_pcb = NULL;
@@ -1673,7 +2432,7 @@ static err_t mcu_tcp_connected( __attribute__((unused)) void *arg, __attribute__
   
   debugf("Connected");
   at_wifi_puts("Connected\r\n");
-  wifi_state = WIFI_STATE_CONNECTED;  // connected
+  network_status |= NETWORK_STATUS_TCP_CONNECTED;
   return ERR_OK;
 }
 
@@ -1681,11 +2440,13 @@ static void mcu_tcp_err(__attribute__((unused)) void *arg, err_t err) {
   if( err == ERR_RST) {
     debugf("tcp connection reset");
     at_wifi_puts("\r\nNO CARRIER\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;      
+    wifi_state = WIFI_STATE_DISCONNECTED;
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
   } else if (err == ERR_ABRT) {
     debugf("err abort");
     at_wifi_puts("Connection failed\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;    
+    wifi_state = WIFI_STATE_DISCONNECTED;
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
   } else {
     debugf("tcp_err %d", err);
   }
@@ -1695,7 +2456,8 @@ err_t mcu_tcp_recv(__attribute__((unused)) void *arg, struct tcp_pcb *tpcb, stru
   if (!p) {
     debugf("No data, disconnected?");
     at_wifi_puts("\r\nNO CARRIER\r\n");
-    wifi_state = WIFI_STATE_DISCONNECTED;    
+    wifi_state = WIFI_STATE_DISCONNECTED;
+    network_status &= ~NETWORK_STATUS_TCP_CONNECTED;
     return ERR_OK;
   }
 
@@ -1711,8 +2473,9 @@ err_t mcu_tcp_recv(__attribute__((unused)) void *arg, struct tcp_pcb *tpcb, stru
 }
 
 static void mcu_tcp_connect(const ip_addr_t *ipaddr, int port) {
+  if(!network_available()) return;
+
   debugf("Connecting to IP %s %d", ipaddr_ntoa(ipaddr), port);
-  
   // the address was resolved and we can connect
   tcp_pcb = tcp_new_ip_type(IP_GET_TYPE(ipaddr));
   if (!tcp_pcb) {    
@@ -1733,7 +2496,11 @@ static void mcu_tcp_connect(const ip_addr_t *ipaddr, int port) {
 }
 
 void mcu_hw_tcp_disconnect(void) {
-  if(wifi_state == WIFI_STATE_CONNECTED)
+  if(!network_available()) return;
+
+  if(!(network_status & NETWORK_STATUS_TCP_CONNECTED))
+    at_wifi_puts("Not connected!\r\n");
+  else
     tcp_close(tcp_pcb);
 }
 
@@ -1752,6 +2519,8 @@ static void dns_found(__attribute__((unused)) const char *hostname, const ip_add
 void mcu_hw_tcp_connect(char *host, int port) {
   static int lport;
   static ip_addr_t address;
+
+  if(!network_available()) return;
 
   lport = port;
   debugf("connecting to %s %d", host, lport);
@@ -1772,7 +2541,7 @@ void mcu_hw_tcp_connect(char *host, int port) {
 }
 
 bool mcu_hw_tcp_data(unsigned char byte) {
-  if(wifi_state == WIFI_STATE_CONNECTED) {
+  if(network_status & NETWORK_STATUS_TCP_CONNECTED) {
     err_t err = tcp_write(tcp_pcb, &byte, 1, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK) debugf("Failed to write data %d", err);
 
@@ -1977,7 +2746,7 @@ void mcu_hw_jtag_set_pins(uint8_t dir, uint8_t data) {
    vTaskDelay(pdMS_TO_TICKS(250));
 
    bflb_irq_disable(gpio->irq_num);
-#ifndef TANG_NANO20K
+#if !defined(TANG_NANO20K) && !defined(TANG_NANO20K_V3923) && !defined(M0S_DOCK)
     bflb_gpio_deinit(gpio, SPI_PIN_MISO);
     bflb_gpio_deinit(gpio, SPI_PIN_MOSI);
     bflb_gpio_deinit(gpio, SPI_PIN_SCK);
@@ -1993,7 +2762,7 @@ void mcu_hw_jtag_set_pins(uint8_t dir, uint8_t data) {
     bflb_gpio_init(gpio, PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
     bflb_gpio_init(gpio, PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
     bflb_gpio_init(gpio, PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-#ifndef TANG_NANO20K
+#if !defined(TANG_NANO20K) && !defined(TANG_NANO20K_V3923) && !defined(M0S_DOCK)
     bflb_gpio_set(gpio, PIN_JTAGSEL); // select JTAG mode
     sys_jtagsel(true);    
 #endif
@@ -2150,7 +2919,7 @@ void mcu_hw_jtag_data(uint8_t *txd, uint8_t *rxd, int len) {
   }
 }
 
-#ifdef TANG_NANO20K
+#if defined(TANG_NANO20K) || defined(TANG_NANO20K_V3923)
 #define JTAG_TDI_BIT  (12)
 #define JTAG_TCK_BIT  (10)
 #define JTAG_TMS_BIT  (16)
@@ -2204,7 +2973,7 @@ void mcu_hw_fpga_resume_spi(void) {
   bflb_gpio_deinit(gpio, PIN_JTAG_TMS);
   bflb_gpio_deinit(gpio, PIN_JTAG_TDO);
 
-#ifndef TANG_NANO20K
+#if !defined(TANG_NANO20K) && !defined(TANG_NANO20K_V3923) && !defined(M0S_DOCK)
   bflb_gpio_init(gpio, SPI_PIN_MISO, GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_3);
   bflb_gpio_init(gpio, SPI_PIN_MOSI, GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_3);
   bflb_gpio_init(gpio, SPI_PIN_SCK, GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_3);
@@ -2241,16 +3010,16 @@ void mcu_hw_jtag_toggleClk(uint32_t clk_len)
 #endif
 
 // USB host MSC support
-static usb_osal_thread_t usbh_msc_handle = NULL;
+static TaskHandle_t usbh_msc_handle = NULL;
 static bool usb_msc_mounted = false;
 
 // bouffalo sdk does not expect sd card _and_ usbh msc to be enabled at the same time
 extern void fatfs_usbh_driver_register(struct usbh_msc *msc_class);
 
-static void usbh_msc_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
+static void usbh_msc_thread(void *arg)
 {
   int ret;
-  struct usbh_msc *msc_class = (struct usbh_msc *)CONFIG_USB_OSAL_THREAD_GET_ARGV;
+  struct usbh_msc *msc_class = (struct usbh_msc *)arg;
 
   while ((msc_class = (struct usbh_msc *)usbh_find_class_instance("/dev/sda")) == NULL) {
       goto delete;
@@ -2268,14 +3037,48 @@ static void usbh_msc_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
   menu_notify(MENU_EVENT_USB_MOUNTED);
 
     // clang-format off
-delete: 
-    usb_osal_thread_delete(NULL);
+delete:
+    vTaskDelete(NULL);
     // clang-format on
 }
 
 void usbh_msc_run(struct usbh_msc *msc_class)
 {
-  usbh_msc_handle = usb_osal_thread_create("usbh_msc", 2048, CONFIG_USBHOST_PSC_PRIO - 1, usbh_msc_thread, msc_class);
+  // short-lived task (scsi init + fatfs register), keep the stack small as the
+  // device may be enumerated while wifi/wpa is under heavy heap pressure
+  if (xTaskCreate(usbh_msc_thread, "usbh_msc", 1024, msc_class,
+                  CONFIG_USBHOST_PSC_PRIO - 1, &usbh_msc_handle) != pdPASS) {
+    usbh_msc_handle = NULL;
+    usb_debugf("usbh_msc: task creation failed\r\n");
+  }
+}
+
+volatile size_t xMallocFailedSize = 0;
+
+// overrides the SDK's weak hook to report the heap state before aborting
+void vApplicationMallocFailedHook(void)
+{
+  usb_debugf("vApplicationMallocFailedHook: request %u bytes, task %s\r\n",
+         (unsigned)xMallocFailedSize, pcTaskGetName(NULL));
+
+  for (uint32_t i = 0; i < CONFIG_MM_HEAP_COUNT; i++) {
+    mm_heap_t *heap = g_mem_manager.heaps[i];
+    if (!heap || !heap->is_active) continue;
+
+    const mm_allocator_t *allocator = g_mem_manager.allocators[heap->allocator_id];
+    if (!allocator || !allocator->get_usage_info) continue;
+
+    struct mm_usage_info usage;
+    uintptr_t flags = mm_lock_save();
+    allocator->get_usage_info(heap, &usage);
+    mm_unlock_restore(flags);
+
+    usb_debugf("  heap %u (%s): total %u, free %u, largest free block %u\r\n",
+           (unsigned)i, heap->name, (unsigned)usage.total_size,
+           (unsigned)usage.free_size, (unsigned)usage.max_free_size);
+  }
+
+  abort();
 }
 
 void usbh_msc_stop(struct usbh_msc *msc_class)
@@ -2367,40 +3170,471 @@ bool mcu_hw_usb_msc_present(void) {
   return usb_msc_mounted;
 }
 
-// M0S_DOCK
-/* GPIO 21 default UART TX */
-/* GPIO 22 default UART RX */
+/* Number of seconds between 1970 and Feb 7, 2036 06:28:16 UTC (epoch 1) */
+#define DIFF_SEC_1970_2036          ((u32_t)2085978496L)
 
-// TANG_NANO20K
-/* GPIO 11 default UART TX */
-/* GPIO 13 default UART RX */
+void sntp_set_system_time(u32_t sec) {
+  debugf("%s(%lu)", __FUNCTION__, sec);
 
-// TANG_CONSOLE60K
-/* GPIO 27 default UART RX, FPGA U15 TX */
-/* GPIO 28 default UART TX, FPGA V15 RX */
-/* GPIO 29 default TWI.SDA, FPGA L13 DDC DAT */
-/* GPIO 30 default TWI.SCL, FPGA M13 DDC CLK */
-/* GPIO 21 USB-C SBU1 */
-/* GPIO 22 USB-C SBU2 */
+  time_t ut = sec + 3600 * inifile_config_get_int("ntp", "timezone", 0);
+  struct tm* timeinfo = gmtime(&ut);
 
-// TANG_MEGA138KPRO
-/* GPIO 10 default UART TX, FPGA N16, RX */
-/* GPIO 11 default UART RX, FPGA P15, TX */
-/* GPIO 27 default PLL1_TWI SDA, FPGA K26, SDA */
-/* GPIO 28 default PLL1_TWI SCL, FPGA K25, SCL */
+  // time is UTC ...
+  debugf(" YEAR:     %u", 1900 + timeinfo->tm_year);
+  debugf(" MONTH:    %u", 1 + timeinfo->tm_mon);
+  debugf(" DAY:      %u", timeinfo->tm_mday);
+  debugf(" WEEK DAY: %u", timeinfo->tm_wday);
+  debugf(" HOUR:     %u", timeinfo->tm_hour);
+  debugf(" MINUTE:   %u", timeinfo->tm_min);
+  debugf(" SECOND:   %u", timeinfo->tm_sec);
+  debugf(" DST:      %s", timeinfo->tm_isdst?"true":"false");
 
-// TANG_MEGA60K
-/* GPIO 27 default UART RX, FPGA U15 TX */
-/* GPIO 28 default UART TX, FPGA V15 RX */
-/* GPIO 16 PWR_KEY, no FPGA connection, re-use possible */
-/* GPIO 17 BL616_IO17_ModeSel, no FPGA connection, re-use possible */
-/* GPIO 20 I2C INT, no FPGA connection */
-/* GPIO 21 I2C SDA, no FPGA connection */
-/* GPIO 22 I2C CLK, no FPGA connection, re-use possible */
+  // send time into core
+  sys_set_time(SYS_TIME_FLAGS_NTP | ( timeinfo->tm_isdst?SYS_TIME_FLAGS_DST:0),
+	       timeinfo->tm_year, timeinfo->tm_mon, timeinfo->tm_mday + (timeinfo->tm_wday << 5),
+	       timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+}
 
-// TANG_PRIMER25K
-/* GPIO 11 default UART TX */
-/* GPIO 10 default UART RX */
-/* GPIO 12 access at button S3, Capacitor C22 need to be removed */
-/* GPIO 20 access at LED6, not usable for UART, unknown reason */
+ip_addr_t g_ipaddr;
+ip_addr_t g_netmask;
+ip_addr_t g_gateway;
 
+static void usbh_lwip_netif_link_callback(struct netif *netif)
+{
+  if (netif != active_network_netif) return;
+
+  debugf("USB netif link status changed %s", netif_is_link_up(netif) ? "up" : "down");
+  if (netif_is_link_up(netif)) {
+    network_status |= NETWORK_STATUS_UP;
+    if (network_uses_dhcp()) {
+      if (dhcp_handle)
+        xTimerStart(dhcp_handle, 0);
+    } else {
+      network_apply_static_ipv4(netif);
+    }
+  } else {
+    if (active_network_interface != NETWORK_INTERFACE_WIFI) {
+      network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR |
+                          NETWORK_STATUS_TCP_CONNECTED);
+      menu_notify_network_disconnected();
+    }
+    if (network_uses_dhcp()) {
+      dhcp_stop(netif);
+      dhcp_cleanup(netif);
+    }
+  }
+}
+
+static void usbh_lwip_netif_status_callback(struct netif *netif)
+{
+  if (netif != active_network_netif) return;
+
+  debugf("USB netif status changed %s", ip4addr_ntoa(netif_ip4_addr(netif)));
+
+  if (!ip4_addr_isany_val(*netif_ip4_addr(netif))) {
+    if (!(network_status & NETWORK_STATUS_HAS_ADDR)) {
+      debugf("just got an ip address");
+      menu_notify_ip(ip4addr_ntoa(netif_ip4_addr(netif)));
+#if LWIP_SNTP
+      if (!(network_status & NETWORK_STATUS_SNTP_STARTED)) {
+        network_status |= NETWORK_STATUS_SNTP_STARTED;
+#if SNTP_SERVER_DNS
+        if (ip_addr_isany(sntp_getserver(0)) && sntp_getservername(0) == NULL)
+          sntp_setservername(0, SNTP_FALLBACK_SERVER);
+#endif
+        sntp_init();
+      } else {
+        debugf("sntp already started");
+      }
+#else
+      network_status |= NETWORK_STATUS_SNTP_STARTED;
+#endif
+    }
+
+    network_status |= NETWORK_STATUS_HAS_ADDR;
+  } else {
+    network_status &= ~NETWORK_STATUS_HAS_ADDR;
+    menu_notify_network_disconnected();
+  }
+}
+
+void usbh_lwip_eth_output_common(struct pbuf *p, uint8_t *buf)
+{
+    struct pbuf *q;
+    uint8_t *buffer;
+
+    buffer = buf;
+    for (q = p; q != NULL; q = q->next) {
+        usb_memcpy(buffer, q->payload, q->len);
+        buffer += q->len;
+    }
+}
+
+void usbh_lwip_eth_input_common(struct netif *netif, uint8_t *buf, uint32_t len)
+{
+    pbuf_type type = PBUF_RAM;
+    err_t err;
+    struct pbuf *p;
+
+    p = pbuf_alloc(PBUF_RAW, len, type);
+    if (p != NULL) {
+        usb_memcpy(p->payload, buf, len);
+        err = netif->input(p, netif);
+        if (err != ERR_OK) {
+            pbuf_free(p);
+        }
+    } else {
+        debugf("No memory to alloc pbuf");
+    }
+}
+
+static void dhcp_timeout(void *arg)
+{
+    struct netif *netif = (struct netif *)arg;
+    struct dhcp *dhcp;
+    if (netif_is_up(netif)) {
+
+        dhcp = netif_dhcp_data(netif);
+
+        if (dhcp && (dhcp->state == DHCP_STATE_BOUND)) {
+
+            debugf("IPv4 Address     : %s", ipaddr_ntoa(&netif->ip_addr));
+            debugf("IPv4 Subnet mask : %s", ipaddr_ntoa(&netif->netmask));
+            debugf("IPv4 Gateway     : %s", ipaddr_ntoa(&netif->gw));
+
+            xTimerStop(dhcp_handle, 0);
+        }
+    } else {
+    }
+}
+
+static void network_link_monitor(void *arg)
+{
+    struct netif *netif = (struct netif *)arg;
+  enum network_interface interface = active_usb_network_interface;
+  bool fallback_requested = false;
+  bool asix_status_monitor_started = false;
+
+    while (active_network_netif == netif) {
+      bool connected;
+
+      if (interface == NETWORK_INTERFACE_ASIX && asix_status_monitor_started &&
+          active_asix) {
+        int status = usbh_asix_get_connect_status(active_asix);
+        if (status < 0)
+          debugf("ASIX link status request failed: %d", status);
+      }
+
+      if (interface == NETWORK_INTERFACE_RTL8152) {
+        connected = active_rtl8152 &&
+                    *(volatile bool *)&active_rtl8152->connect_status;
+      } else {
+        connected = active_asix &&
+                    *(volatile bool *)&active_asix->connect_status;
+      }
+
+      if (connected) {
+        if (interface == NETWORK_INTERFACE_ASIX)
+          asix_status_monitor_started = true;
+        fallback_requested = false;
+        if (active_network_interface != interface) {
+          active_network_interface = interface;
+          network_status &= ~NETWORK_STATUS_WIFI;
+        }
+        if (!netif_is_link_up(netif)) {
+          netif_set_default(netif);
+          netif_set_link_up(netif);
+        }
+      } else {
+        if (netif_is_link_up(netif))
+          netif_set_link_down(netif);
+
+        if (active_network_interface == interface) {
+          active_network_interface = NETWORK_INTERFACE_NONE;
+          network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR |
+                              NETWORK_STATUS_TCP_CONNECTED);
+        }
+
+        if (active_network_interface == NETWORK_INTERFACE_NONE &&
+            !fallback_requested) {
+          fallback_requested = true;
+          mcu_hw_wifi_auto_connect();
+        }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    network_link_task = NULL;
+    vTaskDelete(NULL);
+}
+
+struct netif g_rtl8152_netif;
+
+static err_t usbh_rtl8152_linkoutput(struct netif *netif, struct pbuf *p)
+{
+    int ret;
+    (void)netif;
+
+    usbh_lwip_eth_output_common(p, usbh_rtl8152_get_eth_txbuf());
+    ret = usbh_rtl8152_eth_output(p->tot_len);
+    if (ret < 0) {
+        return ERR_BUF;
+    } else {
+        return ERR_OK;
+    }
+}
+
+void usbh_rtl8152_eth_input(uint8_t *buf, uint32_t buflen)
+{
+    usbh_lwip_eth_input_common(&g_rtl8152_netif, buf, buflen);
+}
+
+static err_t usbh_rtl8152_if_init(struct netif *netif)
+{
+    LWIP_ASSERT("netif != NULL", (netif != NULL));
+
+    netif->mtu = 1500;
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_UP;
+    netif->state = NULL;
+    netif->name[0] = 'E';
+    netif->name[1] = 'X';
+    netif->output = etharp_output;
+    netif->linkoutput = usbh_rtl8152_linkoutput;
+    return ERR_OK;
+}
+
+void usbh_rtl8152_run(struct usbh_rtl8152 *rtl8152_class)
+{
+    struct netif *netif = &g_rtl8152_netif;
+
+  if (active_network_netif != NULL ||
+      active_network_interface != NETWORK_INTERFACE_NONE) {
+    debugf("Ignoring RTL8152 since another network interface is active");
+    return;
+  }
+
+    netif->hwaddr_len = 6;
+    memcpy(netif->hwaddr, rtl8152_class->mac, 6);
+
+    IP4_ADDR(&g_ipaddr, 0, 0, 0, 0);
+    IP4_ADDR(&g_netmask, 0, 0, 0, 0);
+    IP4_ADDR(&g_gateway, 0, 0, 0, 0);
+
+    network_status |= NETWORK_STATUS_TCPIP_INIT;
+
+    netif = netif_add(netif, &g_ipaddr, &g_netmask, &g_gateway, NULL, usbh_rtl8152_if_init, tcpip_input);
+    active_network_interface = NETWORK_INTERFACE_RTL8152;
+    active_usb_network_interface = NETWORK_INTERFACE_RTL8152;
+    active_network_netif = netif;
+    netif_set_link_callback(netif, usbh_lwip_netif_link_callback);
+    netif_set_status_callback(netif, usbh_lwip_netif_status_callback);
+    while (!netif_is_up(netif)) {
+    }
+
+    dhcp_handle = xTimerCreate("dhcp", pdMS_TO_TICKS(200), pdTRUE, netif, dhcp_timeout);
+    if (dhcp_handle == NULL) {
+        debugf("timer creation failed!");
+        while (1) {
+        }
+    }
+
+    xTaskCreate(usbh_rtl8152_rx_thread, "usbh_rtl8152_rx", USB_ETH_RX_TASK_STACK_SIZE, NULL,
+                CONFIG_USBHOST_PSC_PRIO + 1, NULL);
+    active_rtl8152 = rtl8152_class;
+    xTaskCreate(network_link_monitor, "net link", NETWORK_LINK_TASK_STACK_SIZE, netif,
+            CONFIG_USBHOST_PSC_PRIO + 1, &network_link_task);
+    sntp_enable_dhcp_servers();
+    if (network_uses_dhcp()) {
+      dhcp_start(netif);
+      xTimerStart(dhcp_handle, 0);
+    }
+}
+
+void usbh_rtl8152_stop(struct usbh_rtl8152 *rtl8152_class)
+{
+    struct netif *netif = &g_rtl8152_netif;
+    (void)rtl8152_class;
+
+  if (active_network_netif != netif) return;
+
+    if (network_link_task) {
+        vTaskDelete(network_link_task);
+        network_link_task = NULL;
+    }
+
+    if (network_uses_dhcp()) {
+      dhcp_stop(netif);
+      dhcp_cleanup(netif);
+    }
+    if (dhcp_handle) {
+        xTimerDelete(dhcp_handle, 0);
+        dhcp_handle = NULL;
+    }
+    netif_set_down(netif);
+    netif_remove(netif);
+    active_network_netif = NULL;
+    active_usb_network_interface = NETWORK_INTERFACE_NONE;
+    if (active_network_interface == NETWORK_INTERFACE_RTL8152)
+      active_network_interface = NETWORK_INTERFACE_NONE;
+    active_rtl8152 = NULL;
+    if (active_network_interface != NETWORK_INTERFACE_WIFI)
+      network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR | NETWORK_STATUS_TCP_CONNECTED);
+}
+
+struct netif g_asix_netif;
+
+static err_t usbh_asix_linkoutput(struct netif *netif, struct pbuf *p)
+{
+    int ret;
+    (void)netif;
+
+    usbh_lwip_eth_output_common(p, usbh_asix_get_eth_txbuf());
+    ret = usbh_asix_eth_output(p->tot_len);
+    if (ret < 0) {
+        return ERR_BUF;
+    } else {
+        return ERR_OK;
+    }
+}
+
+void usbh_asix_eth_input(uint8_t *buf, uint32_t buflen)
+{
+    usbh_lwip_eth_input_common(&g_asix_netif, buf, buflen);
+}
+
+static err_t usbh_asix_if_init(struct netif *netif)
+{
+    LWIP_ASSERT("netif != NULL", (netif != NULL));
+
+    netif->mtu = 1500;
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_UP;
+    netif->state = NULL;
+    netif->name[0] = 'E';
+    netif->name[1] = 'X';
+    netif->output = etharp_output;
+    netif->linkoutput = usbh_asix_linkoutput;
+    return ERR_OK;
+}
+
+void usbh_asix_run(struct usbh_asix *asix_class)
+{
+    struct netif *netif = &g_asix_netif;
+
+  if (active_network_netif != NULL ||
+      active_network_interface != NETWORK_INTERFACE_NONE) {
+    debugf("Ignoring ASIX since another network interface is active");
+    return;
+  }
+
+    netif->hwaddr_len = 6;
+    memcpy(netif->hwaddr, asix_class->mac, 6);
+
+    IP4_ADDR(&g_ipaddr, 0, 0, 0, 0);
+    IP4_ADDR(&g_netmask, 0, 0, 0, 0);
+    IP4_ADDR(&g_gateway, 0, 0, 0, 0);
+
+    network_status |= NETWORK_STATUS_TCPIP_INIT;
+
+    netif = netif_add(netif, &g_ipaddr, &g_netmask, &g_gateway, NULL, usbh_asix_if_init, tcpip_input);
+    active_network_interface = NETWORK_INTERFACE_ASIX;
+    active_usb_network_interface = NETWORK_INTERFACE_ASIX;
+    active_network_netif = netif;
+    netif_set_link_callback(netif, usbh_lwip_netif_link_callback);
+    netif_set_status_callback(netif, usbh_lwip_netif_status_callback);
+    while (!netif_is_up(netif)) {
+    }
+
+    dhcp_handle = xTimerCreate("dhcp", pdMS_TO_TICKS(200), pdTRUE, netif, dhcp_timeout);
+    if (dhcp_handle == NULL) {
+        debugf("timer creation failed!");
+        while (1) {
+        }
+    }
+
+    xTaskCreate(usbh_asix_rx_thread, "usbh_asix_rx", USB_ETH_RX_TASK_STACK_SIZE, NULL,
+                CONFIG_USBHOST_PSC_PRIO + 1, NULL);
+    active_asix = asix_class;
+    xTaskCreate(network_link_monitor, "net link", NETWORK_LINK_TASK_STACK_SIZE, netif,
+            CONFIG_USBHOST_PSC_PRIO + 1, &network_link_task);
+    sntp_enable_dhcp_servers();
+    if (network_uses_dhcp()) {
+      dhcp_start(netif);
+      xTimerStart(dhcp_handle, 0);
+    }
+}
+
+void usbh_asix_stop(struct usbh_asix *asix_class)
+{
+    struct netif *netif = &g_asix_netif;
+    (void)asix_class;
+
+  if (active_network_netif != netif) return;
+
+    if (network_link_task) {
+        vTaskDelete(network_link_task);
+        network_link_task = NULL;
+    }
+
+    if (network_uses_dhcp()) {
+      dhcp_stop(netif);
+      dhcp_cleanup(netif);
+    }
+    if (dhcp_handle) {
+        xTimerDelete(dhcp_handle, 0);
+        dhcp_handle = NULL;
+    }
+    netif_set_down(netif);
+    netif_remove(netif);
+    active_network_netif = NULL;
+    active_usb_network_interface = NETWORK_INTERFACE_NONE;
+    if (active_network_interface == NETWORK_INTERFACE_ASIX)
+      active_network_interface = NETWORK_INTERFACE_NONE;
+    active_asix = NULL;
+    if (active_network_interface != NETWORK_INTERFACE_WIFI)
+      network_status &= ~(NETWORK_STATUS_UP | NETWORK_STATUS_HAS_ADDR | NETWORK_STATUS_TCP_CONNECTED);
+}
+
+// BL616 MPU pin mapping
+//
+// GPIO | M0S Dock | Nano20K     | Nano20K v3923 | Console60K    | Mega138K Pro | Mega60K  | Primer25K
+// -----+----------+-------------+---------------+---------------+--------------+----------+-----------
+//    0 | TMS      | CSN         | CSN           | TMS/CSN       | TMS/CSN      | TMS/CSN  | TMS/CSN
+//    1 | TCK      | SCK         | SCK           | TCK/SCK       | TCK/SCK      | TCK/SCK  | TCK/SCK
+//    2 | BOOT     | MISO/BOOT   | BOOT          | TDO/MISO/BOOT | TDO/MISO/BOOT| TDO/MISO/BOOT | TDO/MISO/BOOT
+//    3 | TDI      | MOSI        | -             | TDI/MOSI      | TDI/MOSI     | TDI/MOSI | TDI/MOSI
+//    4 | -        | -           | -             | -             | -            | -        | -
+//    5 | -        | -           | -             | -             | -            | -        | -
+//    6 | -        | -           | -             | -             | -            | -        | -
+//    7 | -        | -           | -             | -             | -            | -        | -
+//    8 | -        | -           | -             | -             | -            | -        | -
+//    9 | -        | -           | -             | -             | -            | -        | -
+//   10 | MISO     | TCK         | TCK           | -             | JTAGSEL      | -        | SPI IRQn
+//   11 | MOSI     | UART TX     | UART TX       | -             | SPI IRQn     | -        | JTAGSEL
+//   12 | CSN      | TDI         | TDI           | -             | -            | -        | UART TX (S3)
+//   13 | SCK      | SPI IRQn    | SPI IRQn      | -             | -            | -        | -
+//   14 | SPI IRQn | TDO         | TDO           | -             | -            | -        | -
+//   15 | -        | -           | -             | -             | -            | -        | -
+//   16 | -        | TMS         | TMS           | TF_SDIO_SEL   | -            | PWR_KEY  | -
+//   17 | -        | -           | -             | -             | -            | ModeSel  | -
+//   18 | -        | -           | -             | -             | -            | -        | -
+//   19 | -        | -           | -             | -             | -            | -        | -
+//   20 | TDO      | UART RX     | UART RX       | -             | LED6         | I2C INT  | LED6
+//   21 | UART TX  | SDA         | SDA           | USB-C SBU1    | -            | I2C SDA  | -
+//   22 | UART RX  | SCL         | SCL           | UART RX       | UART RX      | UART RX  | UART RX
+//   23 | -        | -           | -             | -             | -            | -        | -
+//   24 | -        | -           | -             | -             | -            | -        | -
+//   25 | -        | -           | -             | -             | -            | -        | -
+//   26 | -        | -           | -             | -             | -            | -        | -
+//   27 | LED1     | -           | MOSI          | SPI IRQn      | SDA          | SPI IRQn | -
+//   28 | LED2     | -           | -             | JTAGSEL       | UART TX      | JTAGSEL  | -
+//   29 | -        | -           | -             | DDC DAT       | -            | -        | -
+//   30 | -        | -           | MISO          | UART TX       | -            | UART TX  | -
+//
+// Notes:
+// - GPIO 13 (NANO20K) and GPIO 10/11/27 (Tang boards) are the default UART pins
+//   of the board and are re-used as SPI IRQn / JTAGSEL, the UART is crossed.
+// - TANG_PRIMER25K GPIO 12 is accessible at button S3, capacitor C22 needs to
+//   be removed.
+// - CONSOLE60K GPIO 29/30 are the default TWI/DDC pins (FPGA L13/M13).
+// - MEGA138KPRO GPIO 27/28 are the default PLL1_TWI pins (FPGA K26/K25).

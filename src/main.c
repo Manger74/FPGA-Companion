@@ -1,6 +1,5 @@
 /*
   main.c - MiSTeryNano FPGA Companion Pi Pico variant
-
 */
 
 #include "../mcu_hw.h"
@@ -12,8 +11,12 @@
 #include "../menu.h"
 #include "../inifile.h"
 #include "../debug.h"
+#include "../ftpd.h"
+#include "../telnetd.h"
 #include "../xml.h"
 #include "../at_wifi.h"
+
+const char *companion_version = "Companion v1.4.33";
 
 /*-----------------------------------------------------------*/
 /*---            main FPGA communication task            ----*/
@@ -31,6 +34,9 @@ static void com_task(__attribute__((unused)) void *p ) {
     // initialitze SD card
     sdc_init();
 
+    // try to load the global config
+    inifile_config_read();
+    
     // try to load a config .xml from sd card. If the core has identified itself,
     // then e.g. atarist.xml will be read. otherwise config.xml
     FIL fil;
@@ -89,6 +95,8 @@ static void com_task(__attribute__((unused)) void *p ) {
       else     sys_run_action_by_name("ready");
     } else
       debugf("Image upload in progress, delaying ready action");
+
+    ftpd_init();
     
     // finally prepare for wifi communication
     at_wifi_init();
@@ -127,6 +135,7 @@ int main( void )
 #endif
 {
   mcu_hw_init();
+  telnetd_init();
   
   // run FPGA com thread
   xTaskCreate( com_task, "FPGA Com", 4096, NULL, CONFIG_MAX_PRIORITY-1, &com_task_handle );

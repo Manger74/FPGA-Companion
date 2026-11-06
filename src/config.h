@@ -7,6 +7,7 @@
 #define CONFIG_H
 
 #include <stdarg.h>
+#include <stdbool.h>
 
 #ifndef ESP_PLATFORM
 #define CONFIG_MAX_PRIORITY          (32)
@@ -30,6 +31,7 @@
 #define CONFIG_ACTION_COMMAND_LOAD  4
 #define CONFIG_ACTION_COMMAND_HIDE  5
 #define CONFIG_ACTION_COMMAND_LINK  6
+#define CONFIG_ACTION_COMMAND_EXEC  7  // execute a function, for system menu only
 
 typedef struct config_action_command_S {
   unsigned char code;
@@ -43,6 +45,7 @@ typedef struct config_action_command_S {
     } delay;    
     char *filename;
     struct config_action_S *action;
+    void(*exec)(void);
   };
   struct config_action_command_S *next;
 } config_action_command_t;
@@ -80,6 +83,14 @@ typedef struct {
   config_action_t *action;
 } config_button_t;
 
+// selector for core specific ini files, e.g.
+// <cfgselector label="Config" ext="amiga.ini" default="amiga.ini"/>
+typedef struct {
+  char *label;
+  char *def;     // default ini, also stores the last selection
+  char **ext;    // only files ending in ".<ext>" (or being <ext>) are offered
+} config_cfgsel_t;
+
 typedef struct {
   char index;
   char *label;
@@ -97,6 +108,15 @@ typedef struct {
   config_action_t *action;
 } config_toggle_t;
 
+typedef struct {
+  unsigned char id;
+  char *label;
+  bool edit;
+  signed char min;
+  signed char max;
+  signed char def;
+} config_range_t;
+
 #define CONFIG_MENU_ENTRY_UNKNOWN       0
 #define CONFIG_MENU_ENTRY_MENU          1
 #define CONFIG_MENU_ENTRY_FILESELECTOR  2
@@ -104,6 +124,8 @@ typedef struct {
 #define CONFIG_MENU_ENTRY_BUTTON        4
 #define CONFIG_MENU_ENTRY_IMAGE         5
 #define CONFIG_MENU_ENTRY_TOGGLE        6
+#define CONFIG_MENU_ENTRY_RANGE         7
+#define CONFIG_MENU_ENTRY_CFGSELECTOR   8
 
 typedef struct config_menu_entry_S {
   unsigned char type;
@@ -114,6 +136,8 @@ typedef struct config_menu_entry_S {
     config_button_t *button;
     config_image_t *image;
     config_toggle_t *toggle;
+    config_range_t *range;
+    config_cfgsel_t *cfgsel;
   };  
   struct config_menu_entry_S *next;
 } config_menu_entry_t;

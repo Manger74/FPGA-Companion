@@ -4,17 +4,19 @@
 #define HIDPARSER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define REPORT_TYPE_NONE     0
 #define REPORT_TYPE_MOUSE    1
 #define REPORT_TYPE_KEYBOARD 2
 #define REPORT_TYPE_JOYSTICK 3
+#define REPORT_TYPE_CONSUMER 4
 
 #define MAX_AXES 8
 
-// currently only joysticks are supported
+// currently only joysticks and mice are supported
 typedef struct {
-  uint8_t type: 2;               // REPORT_TYPE_...
+  uint8_t type: 3;               // REPORT_TYPE_...
   uint8_t report_id_present: 1;  // REPORT_TYPE_...
   uint8_t report_id;
   uint8_t report_size;
@@ -22,8 +24,9 @@ typedef struct {
   union {
     struct {
       struct {
-	uint16_t offset;
-	uint8_t size;
+	uint16_t offset;  // bit offset inside report
+	uint8_t size;     // size in bits
+	int8_t index;     // index of axis inside report
 	struct {
 	  uint16_t min;
 	  uint16_t max;
@@ -33,7 +36,7 @@ typedef struct {
       struct {
 	uint8_t byte_offset;
 	uint8_t bitmask;
-       } button[32]; // 12 buttons max
+       } button[32]; // 32 buttons max
       
       struct {
 	uint16_t offset;
@@ -59,5 +62,6 @@ typedef struct {
 } hid_report_t;
 
 bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t *conf, uint16_t *rbytes);
+void fix_report_descriptor(uint16_t vid, uint16_t pid, uint16_t version, uint8_t *desc, uint16_t len);
 
 #endif // HIDPARSER_H

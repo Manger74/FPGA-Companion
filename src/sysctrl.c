@@ -55,7 +55,8 @@ int sys_status_is_valid(void) {
       // check colboot status
       sys_debugf("Coldboot status is %02x", coldboot);
     }
-  }
+  } else
+    sys_debugf("Unexpected status reply: %02x/%02x/%02x/%02x", b0, b1, core_id, coldboot);
   
   return((b0 == 0x5c) && (b1 == 0x42));
 }
@@ -85,7 +86,7 @@ unsigned char sys_get_buttons(void) {
   return btns;
 }
 
-void sys_set_val(char id, uint8_t value) {
+void sys_set_val(char id, int8_t value) {
   sys_debugf("set value %c = %d", id, value);
   
   sys_begin(SPI_SYS_SETVAL);   // send value command
@@ -226,6 +227,23 @@ static int16_t sys_port_get(unsigned char port) {
   return d;
 }
 
+// a timer to handle delayed reboot if the MCU detects that the core has changed but
+// USB/JTAG needs to finish cleanly before reboot fires
+#ifdef ENABLE_JTAG
+static TimerHandle_t sys_reboot_timer = NULL;  
+
+static void sys_reboot(__attribute__((unused)) TimerHandle_t arg) {
+  // check if jtag is still busy and re-schedule timer in that case
+  if(mcu_hw_jtag_is_active()) {
+    sys_debugf("Delayed MCU reset, jtag still in progress");
+    xTimerStart( sys_reboot_timer, 0 );
+  } else {
+    sys_debugf("Delayed MCU reset, jtag done, rebooting");
+    mcu_hw_reset();
+  }
+}
+#endif
+
 static void sys_handle_event(bool ignore_coldboot) {
   // the FPGAs cold boot flag was set indicating that the
   // FPGA has be reloaded while the MCU was running. Reset
@@ -269,7 +287,7 @@ static void sys_handle_event(bool ignore_coldboot) {
 
     // the second button controls the OSD, so it can be used in conjunction
     // with 
-#if defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
+#if defined(M0S_DOCK)||defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_NANO20K_V3923)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)||(MISTLE_BOARD == 6)||(MISTLE_BOARD == 7)
     if(!mcu_hw_jtag_is_active())
 #endif
 
@@ -284,20 +302,29 @@ static void sys_handle_event(bool ignore_coldboot) {
     else {
       sys_debugf("FPGA cold boot detected, reseting MCU ...");
 
-#if defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)
+#if defined(M0S_DOCK)||defined(TANG_CONSOLE60K)||defined(TANG_NANO20K)||defined(TANG_NANO20K_V3923)||defined(TANG_MEGA138KPRO)||defined(TANG_MEGA60K)||defined(TANG_PRIMER25K)||(MISTLE_BOARD == 2)||(MISTLE_BOARD == 4)||(MISTLE_BOARD == 5)||(MISTLE_BOARD == 6)||(MISTLE_BOARD == 7)
       // Check for USB-JTAG activity and don't reset (and thus break
       // the JTAG activity)
       if(mcu_hw_jtag_is_active()) {
-	      debugf("Suppressing MCU reset due to JTAG activity");
+	sys_debugf("Delaying MCU reset due to JTAG activity");
+	      
         // stop OSD task to avoid further SPI traffic 
         if (menu_handle != NULL) {
           vTaskDelete(menu_handle);
           menu_handle = NULL;
+
+	  // Start a timeout timer, so that we can detect the end
+	  // of USB communication and trigger the restart then. A restart
+	  // is needed to cope with the potentially newly uploaded core and
+	  // to make sure disabled functions are being re-enabled
+	  sys_reboot_timer = xTimerCreate( "sys reboot timer", pdMS_TO_TICKS(1000), pdFALSE,
+					   NULL, sys_reboot);
+	  xTimerStart( sys_reboot_timer, 0 );	  
         }
       }
       else	
 #endif
-	       mcu_hw_reset();
+	mcu_hw_reset();
     }
   }
 }
@@ -379,7 +406,12 @@ void sys_run_action(config_action_t *action) {
       
     case CONFIG_ACTION_COMMAND_SAVE:
       sys_debugf("SAVE %s", command->filename);
-      inifile_write(command->filename);
+      // tell the user whether saving worked, it was silent before. The settings
+      // go into the config in use, not into the default ini while another is selected
+      if(inifile_write((char*)menu_cfgsel_save_name(command->filename)) == 0)
+        menu_draw_dialog("Settings", "saved");
+      else
+        menu_draw_dialog("Settings", "save failed");
       break;
       
     case CONFIG_ACTION_COMMAND_HIDE:
@@ -391,7 +423,13 @@ void sys_run_action(config_action_t *action) {
       sys_debugf("LINK");
       sys_run_action(command->action);
       break;
+      
+    case CONFIG_ACTION_COMMAND_EXEC:
+      sys_debugf("EXEC");
+      command->exec();
+      break;      
     }
+    
     command = command->next;
   }
 }
@@ -498,7 +536,7 @@ char *sys_get_config(void) {
 
     // terminate the config string
     dst[dstlen] = '\0';
-    
+
     return (char*)dst;
   }
   
@@ -508,5 +546,19 @@ char *sys_get_config(void) {
 void sys_jtagsel(char on) {
   sys_begin(SPI_SYS_JTAGSEL);
   mcu_hw_spi_tx_u08(on?1:0);
+  mcu_hw_spi_end();
+}
+
+void sys_set_time(uint8_t flags, uint8_t year, uint8_t month, uint8_t day,
+		  uint8_t hour, uint8_t minute, uint8_t second) {
+  sys_begin(SPI_SYS_TIME);
+  mcu_hw_spi_tx_u08(SPI_SYS_TIME_SET);
+  mcu_hw_spi_tx_u08(flags);    // bit 1: dst, bit 0: ntp
+  mcu_hw_spi_tx_u08(year);     // since 1900
+  mcu_hw_spi_tx_u08(month);    // 0..11
+  mcu_hw_spi_tx_u08(day);      // lowest 5 bit = 1..31, top 3 bits = day in week (1..7)
+  mcu_hw_spi_tx_u08(hour);     // 0..23
+  mcu_hw_spi_tx_u08(minute);   // 0..59
+  mcu_hw_spi_tx_u08(second);   // 0..59
   mcu_hw_spi_end();
 }
