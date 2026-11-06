@@ -7,6 +7,7 @@
 #include "menu.h"
 
 #include "inifile.h"
+#include "config.h"
 #include "mcu_hw.h"
 
 #include <string.h>  // for memcpy
@@ -32,14 +33,26 @@ void hid_release_joystick(uint8_t idx) {
   usb_debugf("Releasing joystick %d (map = %02x)", idx, joystick_map);
 }
 
+// Short keyboards have no second Amiga key: on an Amiga core (NanoMig) Ctrl +
+// LGUI (left Amiga) is sent as RGUI (right Amiga), Ctrl is suppressed meanwhile.
+// Not applied if RGUI is physically pressed, so Ctrl+LAmiga+RAmiga (reset) works
+static uint8_t amiga_ctrl_map(uint8_t mod) {
+  if ((mod & 0x08) && (mod & 0x11) && !(mod & 0x80) && cfg && cfg->name && !strcasecmp(cfg->name, "NanoMig"))
+    mod = (uint8_t)((mod & ~0x19) | 0x80);
+  return mod;
+}
+
 void kbd_parse_usage_state(struct hid_kbd_state_S *state, uint8_t modifiers,
                            const uint8_t keys[32])
 {
-  if (modifiers != state->modifiers && !osd_is_visible()) {
+  uint8_t mod_old = amiga_ctrl_map(state->modifiers);
+  uint8_t mod_new = amiga_ctrl_map(modifiers);
+
+  if (mod_new != mod_old && !osd_is_visible()) {
     for (int bit = 0; bit < 8; bit++) {
-      if ((state->modifiers & (1U << bit)) && !(modifiers & (1U << bit)))
+      if ((mod_old & (1U << bit)) && !(mod_new & (1U << bit)))
         kbd_tx_hid_ps2_break(bit, 1);
-      if (!(state->modifiers & (1U << bit)) && (modifiers & (1U << bit)))
+      if (!(mod_old & (1U << bit)) && (mod_new & (1U << bit)))
         kbd_tx_hid_ps2_make(bit, 1);
     }
   }
