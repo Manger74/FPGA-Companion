@@ -6,3 +6,4 @@ uint32_t ulTaskNotifyTake(int, TickType_t);
 int xTaskNotifyGive(TaskHandle_t);
 TickType_t xTaskGetTickCount(void);
 void vTaskDelay(TickType_t);
+void vTaskDelete(TaskHandle_t);

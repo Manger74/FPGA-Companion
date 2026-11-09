@@ -11,11 +11,12 @@
 
 #include <stdbool.h>
 
-// peers are hosts behind an interface of the Companion (ppp or plip) which appear as hosts of the
+// peers are hosts behind an interface of the Companion (ppp, plip or a314) which appear as hosts of the
 // lan: proxy ARP and forwarding in both directions, see ppp_port.c
-#define PORT_PEERS  2
+#define PORT_PEERS  3
 #define PEER_PPP    0
 #define PEER_PLIP   1
+#define PEER_A314   2
 
 struct netif;
 struct ip4_addr;

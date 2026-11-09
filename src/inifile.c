@@ -441,6 +441,10 @@ static const struct {
   { "PLIP", "LOOPBACK", CONFIG_TYPE_INT, NULL },
   { "PLIP", "IP", CONFIG_TYPE_IP, NULL },
   { "PLIP", "PEER", CONFIG_TYPE_IP, NULL },
+  // A314: clockport interface of the A314 (a314.device, a314eth.device), see a314_port.c
+  { "A314", "ENABLE", CONFIG_TYPE_INT, NULL },
+  { "A314", "IP", CONFIG_TYPE_IP, NULL },
+  { "A314", "PEER", CONFIG_TYPE_IP, NULL },
 
   // MENU/OSD
   { "MENU", "GAMEPAD_TRIGGER", CONFIG_TYPE_INT, NULL },  

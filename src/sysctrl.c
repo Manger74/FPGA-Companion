@@ -20,6 +20,7 @@
 #include "at_wifi.h"
 #ifdef ENABLE_PPP_SERVER
 #include "plip_port.h"
+#include "a314_port.h"
 #endif
 
 // we are using "puff" to decompress a gzip'd FPGA config as this is a slow, yet
@@ -354,6 +355,9 @@ void sys_handle_interrupts(unsigned char pending, bool ignore_coldboot) {
 #ifdef ENABLE_PPP_SERVER
   if(pending & 0x20) // irq 5 = NET (plip)
     plip_handle_event();
+
+  if(pending & 0x40) // irq 6 = A314 (pi_irq of a314_cp)
+    a314_handle_event();
 #endif
   //  if(pending & 0x10) // irq 4 = AUDIO
   //    audio_handle_event();
