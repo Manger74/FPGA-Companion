@@ -21,7 +21,7 @@
 */
 
 #include "a314_port.h"
-#include "a314_proto.h"
+#include "../a314_proto.h"
 #include "ppp_port.h"
 
 #include <string.h>

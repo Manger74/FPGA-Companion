@@ -47,6 +47,6 @@ SRCS=$(ls "$LWIP"/src/core/*.c "$LWIP"/src/core/ipv4/*.c "$LWIP"/src/netif/ether
        grep -v -e ip6 -e altcp -e dns.c -e dhcp -e autoip -e igmp)
 gcc -g -O0 -Wall -Wno-unused-function -std=gnu11 -DENABLE_PPP_SERVER \
     -I"$HERE" -I"$OUT" -I"$PLIP" -I"$PLIP/stub" -I"$LWIP/contrib/ports/unix/port/include" \
-    -I"$SRC/rp2040" -I"$SRC" -I"$LWIP/src/include" \
+    -I"$SRC/rp2040" -I"$LWIP/src/include" \
     "$HERE/test_a314_port.c" "$SRC/a314_proto.c" "$PLIP/plat.c" $SRCS -o "$OUT/test_a314_port"
 "$OUT/test_a314_port"
