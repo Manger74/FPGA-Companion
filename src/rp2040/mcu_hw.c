@@ -722,6 +722,17 @@ unsigned char mcu_hw_spi_tx_u08(unsigned char b) {
   return retval;
 }
 
+// A block of bytes without a gap between them. Only for data the core does not answer:
+// the reply to a byte is not ready in time for the next one without a gap (mcu_spi.v).
+void mcu_hw_spi_write(const unsigned char *data, int len) {
+  spi_write_blocking(SPI_BUS, data, len);
+  busy_wait_us_32(1);   // the core needs a moment for the last byte before chip select is released
+}
+
+unsigned long mcu_hw_micros(void) {
+  return time_us_32();
+}
+
 /* ======================================================================= */
 /* ======                   custom usb host drivers              ========= */
 /* ======================================================================= */

@@ -32,7 +32,8 @@ void vTaskDelay(TickType_t t) {}
 void vTaskDelete(TaskHandle_t t) { task_deleted++; }
 u32_t sys_now(void) { return ticks; }
 bool mcu_hw_tcpip_ready(void) { return true; }
-int inifile_config_get_int(char *s, char *n, int def) { return !strcmp(n, "enable") ? 1 : def; }
+static int cfg_burst;
+int inifile_config_get_int(char *s, char *n, int def) { return !strcmp(n, "enable") ? 1 : !strcmp(n, "burst") ? cfg_burst : def; }
 uint32_t inifile_config_get_ip(char *s, char *n, uint32_t def) {
   return !strcmp(n, "peer") ? 0xc0a80132 /* 192.168.1.50 */ : def;
 }
@@ -46,6 +47,10 @@ unsigned char mcu_hw_spi_tx_u08(unsigned char b) {
   if(no_core && core.cmd == 4) return 0;
   return r;
 }
+
+static unsigned long fake_us, n_block;
+unsigned long mcu_hw_micros(void) { return fake_us += 3; }
+void mcu_hw_spi_write(const unsigned char *d, int len) { n_block++; for(int i = 0; i < len; i++) spi_tx6(d[i]); }
 
 #define printf_dbg(...)
 #include <a314_port.c>
@@ -97,7 +102,8 @@ static void amiga_send(const uint8_t *f, int len) {
   pump();
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  cfg_burst = argc > 1;                 // any argument: [A314] BURST=1
   static const uint8_t bcast[6] = {255,255,255,255,255,255}, zero[6] = {0};
   uint8_t f[1600]; int n;
 
@@ -167,6 +173,14 @@ int main(void) {
 	"frame for the Amiga: MAC learned, ttl 63, checksums");
   a_rx_n = 0;
 
+  // 6b. a large frame for the Amiga (written as one SPI block with BURST=1)
+  n = mk_ip_icmp(f, lan_mac, host_mac, 0xc0a80114, 0xc0a80132, 64, 1400); lan_inject(f, n);
+  pump();
+  o = a_rxq[0].data;
+  CHECK(a_rx_n == 1 && a_rxq[0].len == 14 + 20 + 8 + 1400 && inet_chksum(o + 14, 20) == 0 && inet_chksum(o + 34, 1408) == 0,
+	"1442 byte frame arrives unchanged");
+  a_rx_n = 0;
+
   // 7. ping to the Companion on the link is answered
   n = mk_ip_icmp(f, our_mac, amiga_mac, 0xc0a80132, 0xc0a8fd01, 64, 16); amiga_send(f, n);
   o = a_rxq[0].data;
@@ -211,7 +225,8 @@ int main(void) {
   a_service();
   CHECK(!buf_pending[2], "forced service takes the request");
 
-  printf("   SPI bytes in total: %u\n", (unsigned)core.n_spi);
+  printf("   SPI bytes in total: %u, block writes: %lu\n", (unsigned)core.n_spi, n_block);
+  CHECK((n_block > 0) == (cfg_burst != 0), "block writes only with BURST=1");
   printf("%s (%d Checks, %d Fehler)\n", fails ? "FAIL" : "PASS", checks, fails);
   return fails != 0;
 }

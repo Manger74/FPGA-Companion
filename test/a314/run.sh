@@ -50,3 +50,5 @@ gcc -g -O0 -Wall -Wno-unused-function -std=gnu11 -DENABLE_PPP_SERVER \
     -I"$SRC/rp2040" -I"$LWIP/src/include" \
     "$HERE/test_a314_port.c" "$SRC/a314_proto.c" "$PLIP/plat.c" $SRCS -o "$OUT/test_a314_port"
 "$OUT/test_a314_port"
+echo "== the same with [A314] BURST=1"
+"$OUT/test_a314_port" burst

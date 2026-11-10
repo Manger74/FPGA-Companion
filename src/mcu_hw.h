@@ -20,6 +20,8 @@ void mcu_hw_reset(void);
 // HW SPI interface
 void mcu_hw_spi_begin(void);
 unsigned char mcu_hw_spi_tx_u08(unsigned char b);
+void mcu_hw_spi_write(const unsigned char *data, int len);  // rp2040: block without gaps, replies discarded
+unsigned long mcu_hw_micros(void);                         // rp2040: microseconds, wraps
 void mcu_hw_spi_end(void);
 
 bool mcu_hw_hid_present(void);

@@ -18,6 +18,7 @@
   config.ini:  [A314]  ENABLE=1   switch it on (default 0)
                        IP=...     address of the Companion on this link, default 192.168.253.1
                        PEER=...   address of the Amiga, default 192.168.253.2
+                       BURST=1    write frames to the core as one SPI block without gaps (default 0)
 */
 
 #include "a314_port.h"
@@ -83,22 +84,32 @@ static uint8_t a_status(void) {
   return st;
 }
 
+// time spent in the SPI transfer of whole frames (everything of FRAME_XFER bytes or more)
+#define FRAME_XFER 256
+static bool burst;                       // [A314] BURST=1: frames are written to the core as one block
+static uint32_t t_wr_us, n_wr, t_rd_us, n_rd;
+
 static void a_mem_read(void *ctx, uint16_t addr, uint8_t *dst, uint16_t len) {
   (void)ctx;
   a_begin(SPI_A314_READ);
+  unsigned long t0 = mcu_hw_micros();
   mcu_hw_spi_tx_u08(addr >> 8);
   mcu_hw_spi_tx_u08(addr & 0xff);
   mcu_hw_spi_tx_u08(0);
   for(uint16_t i = 0; i < len; i++) dst[i] = mcu_hw_spi_tx_u08(0);
+  if(len >= FRAME_XFER) { t_rd_us += (uint32_t)(mcu_hw_micros() - t0); n_rd++; }
   mcu_hw_spi_end();
 }
 
 static void a_mem_write(void *ctx, uint16_t addr, const uint8_t *src, uint16_t len) {
   (void)ctx;
   a_begin(SPI_A314_WRITE);
+  unsigned long t0 = mcu_hw_micros();
   mcu_hw_spi_tx_u08(addr >> 8);
   mcu_hw_spi_tx_u08(addr & 0xff);
-  for(uint16_t i = 0; i < len; i++) mcu_hw_spi_tx_u08(src[i]);
+  if(burst && len >= FRAME_XFER) mcu_hw_spi_write(src, len);
+  else for(uint16_t i = 0; i < len; i++) mcu_hw_spi_tx_u08(src[i]);
+  if(len >= FRAME_XFER) { t_wr_us += (uint32_t)(mcu_hw_micros() - t0); n_wr++; }
   mcu_hw_spi_end();
 }
 
@@ -282,8 +293,8 @@ static void a314_task(void *arg) {
   UNLOCK_TCPIP_CORE();
 
   char ours[IP4ADDR_STRLEN_MAX], his[IP4ADDR_STRLEN_MAX];
-  debugf("A314: up, %u bytes RAM, companion %s, amiga %s", (unsigned)(1UL << aw),
-	 ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)), ip4addr_ntoa_r(&peer_ip, his, sizeof(his)));
+  debugf("A314: up, %u bytes RAM, companion %s, amiga %s, burst %s", (unsigned)(1UL << aw),
+	 ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)), ip4addr_ntoa_r(&peer_ip, his, sizeof(his)), burst ? "on" : "off");
 
   TickType_t last_stats = xTaskGetTickCount(), last_lan = last_stats, last_force = last_stats;
   uint32_t last_rx = 0, last_tx = 0;
@@ -305,9 +316,15 @@ static void a314_task(void *arg) {
     if(now - last_stats >= pdMS_TO_TICKS(STATS_MS)) {
       last_stats = now;
       if(n_rx != last_rx || n_tx != last_tx)
+      {
 	debugf("A314: connects %u restarts %u, frames from amiga %u (bad %u) to amiga %u, dropped %u, tx queue full %u",
 	       (unsigned)proto.st_connect, (unsigned)proto.st_restart, (unsigned)n_rx, (unsigned)n_rx_bad,
 	       (unsigned)n_tx, (unsigned)proto.st_dropped, (unsigned)tx_drops);
+	// SPI time per large frame since the last report
+	debugf("A314: spi per frame: write %u us (%u frames), read %u us (%u frames)",
+	       (unsigned)(n_wr ? t_wr_us / n_wr : 0), (unsigned)n_wr, (unsigned)(n_rd ? t_rd_us / n_rd : 0), (unsigned)n_rd);
+	t_wr_us = n_wr = t_rd_us = n_rd = 0;
+      }
       last_rx = n_rx; last_tx = n_tx;
     }
   }
@@ -316,6 +333,7 @@ static void a314_task(void *arg) {
 void a314_port_init(void) {
   if(task || !inifile_config_get_int("a314", "enable", 0)) return;
 
+  burst = inifile_config_get_int("a314", "burst", 0) != 0;
   ip4_addr_set_u32(&our_ip,  lwip_htonl(inifile_config_get_ip("a314", "ip",   0xc0a8fd01)));  // 192.168.253.1
   ip4_addr_set_u32(&peer_ip, lwip_htonl(inifile_config_get_ip("a314", "peer", 0xc0a8fd02)));  // 192.168.253.2
 

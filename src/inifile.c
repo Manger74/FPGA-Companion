@@ -445,6 +445,7 @@ static const struct {
   { "A314", "ENABLE", CONFIG_TYPE_INT, NULL },
   { "A314", "IP", CONFIG_TYPE_IP, NULL },
   { "A314", "PEER", CONFIG_TYPE_IP, NULL },
+  { "A314", "BURST", CONFIG_TYPE_INT, NULL },
 
   // MENU/OSD
   { "MENU", "GAMEPAD_TRIGGER", CONFIG_TYPE_INT, NULL },  
