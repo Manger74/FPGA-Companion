@@ -230,8 +230,20 @@ static void frame_input(uint16_t len) {
 
 /* ---- task ---- */
 
+// report what the Amiga side does, once per change
+static void report(void) {
+  static uint32_t svc, con, rst, ref, cls;
+  if(proto.st_service && !svc) debugf("A314: a314.device found (restart counter %u)", proto.restart);
+  if(proto.st_restart != rst)  debugf("A314: a314.device restarted (restart counter %u)", proto.restart);
+  if(proto.st_connect != con)  debugf("A314: ethernet service connected, stream %u", proto.stream);
+  if(proto.st_refused != ref)  debugf("A314: connect to '%s' refused (%s)", (char*)proto.last_refused,
+				      proto.connected ? "ethernet is already connected" : "unknown service");
+  if(proto.st_reset != cls)    debugf("A314: stream closed by the amiga");
+  svc = proto.st_service; con = proto.st_connect; rst = proto.st_restart; ref = proto.st_refused; cls = proto.st_reset;
+}
+
 static void service(bool force) {
-  if(force || (a_status() & 1)) a314_service(&proto);
+  if(force || (a_status() & 1)) { a314_service(&proto); report(); }
 
   for(int round = 0; round < 8 && tx_rd != __atomic_load_n(&tx_wr, __ATOMIC_ACQUIRE) && a314_can_send(&proto); round++) {
     uint32_t rd = tx_rd;
@@ -309,6 +321,8 @@ void a314_port_init(void) {
 
   if(xTaskCreate(a314_task, "a314", 1024, NULL, configMAX_PRIORITIES-10, &task) != pdPASS)
     debugf("A314: cannot create task");
+  else
+    debugf("A314: enabled, waiting for the network");
 }
 
 void a314_handle_event(void) {

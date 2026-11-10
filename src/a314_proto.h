@@ -67,6 +67,8 @@ struct a314 {
   uint8_t  q_rd, q_wr;            // free running
 
   uint32_t st_connect, st_to_amiga, st_from_amiga, st_dropped, st_restart;
+  uint32_t st_refused, st_reset, st_service;   // connects refused, streams closed by the Amiga, a314_service() with magic
+  uint8_t  last_refused[12];                   // service name of the last refused connect, 0 terminated
   uint8_t  buf[256 + A314_FRAME_MAX];
 };
 

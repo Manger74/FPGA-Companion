@@ -124,6 +124,9 @@ static void handle_packet(struct a314 *a, uint8_t type, uint8_t stream, const ui
       q_put(a, PKT_CONNECT_RESPONSE, &res, 1);
     } else {
       uint8_t res = CONNECT_UNKNOWN;
+      a->st_refused++;
+      uint8_t n = len < sizeof(a->last_refused) - 1 ? len : sizeof(a->last_refused) - 1;
+      memcpy(a->last_refused, d, n); a->last_refused[n] = 0;
       uint8_t cur = a->stream; a->stream = stream;      // the response carries the id of the request
       q_put(a, PKT_CONNECT_RESPONSE, &res, 1);
       a->stream = cur;
@@ -135,7 +138,7 @@ static void handle_packet(struct a314 *a, uint8_t type, uint8_t stream, const ui
   case PKT_EOS:
     break;                                           // not used by the ethernet service
   case PKT_RESET:
-    if(a->connected && stream == a->stream) reset_state(a);
+    if(a->connected && stream == a->stream) { reset_state(a); a->st_reset++; }
     break;
   }
 }
@@ -176,6 +179,7 @@ void a314_service(struct a314 *a) {
     a->magic = true;
   }
 
+  a->st_service++;
   a->ops.mem_read(a->ops.ctx, CAP_BASE, a->cap, 4);
 
   a->ops.mem_read(a->ops.ctx, CAP_BASE + 4, v, 1);
