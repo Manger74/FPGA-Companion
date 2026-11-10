@@ -321,8 +321,6 @@ void a314_port_init(void) {
 
   if(xTaskCreate(a314_task, "a314", 1024, NULL, configMAX_PRIORITIES-10, &task) != pdPASS)
     debugf("A314: cannot create task");
-  else
-    debugf("A314: enabled, waiting for the network");
 }
 
 void a314_handle_event(void) {
