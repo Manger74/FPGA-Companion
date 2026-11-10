@@ -46,7 +46,14 @@
 
 #define FRAME_MAX   1514
 #define A314_MTU    1500
-#define TX_SLOTS    3
+// Frames waiting for a free receive buffer of the Amiga. A download from the internet needs room for
+// about (rate x round trip time) frames, e.g. 170 frames/s x 40 ms = 7; with fewer slots frames
+// are dropped all the time and TCP never gets near the rate of the link ("tx queue full").
+#if defined(PICO_RP2350)
+#define TX_SLOTS    12      // 18 KB
+#else
+#define TX_SLOTS    3       // the RP2040 has no RAM to spare
+#endif
 #define POLL_MS     50       // the interrupt is the normal trigger, this catches a missed one
 #define FORCE_MS    1000     // service the protocol even without the interrupt bit
 #define STATS_MS    30000
