@@ -68,12 +68,21 @@ static uint8_t peer_mac[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };    // until
 static ip4_addr_t our_ip, peer_ip;
 
 // transmit queue, free running counters. tx_wr is only written by plip_output(), tx_rd by the task
-static struct { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; } txq[TX_SLOTS];
+struct txslot { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; };
+#if defined(PICO_RP2350)
+static struct txslot txq[TX_SLOTS];
+#else
+static struct txslot *txq;              // RP2040: from the FreeRTOS heap, only if PLIP is enabled
+#endif
 static uint32_t tx_wr, tx_rd;
 static volatile bool tx_blocked;        // a frame was refused, tcp has to be told when there is room
 static volatile uint32_t tx_drops;
 
+#if defined(PICO_RP2350)
 static uint8_t rxbuf[FRAME_MAX] __attribute__((aligned(4)));
+#else
+static uint8_t *rxbuf;
+#endif
 static uint32_t n_rx, n_tx, n_rx_bad;
 
 /* ---- SPI ---- */
@@ -322,6 +331,17 @@ void plip_port_init(void) {
 
   ip4_addr_set_u32(&our_ip,  lwip_htonl(inifile_config_get_ip("plip", "ip",   0xc0a8fe01)));  // 192.168.254.1
   ip4_addr_set_u32(&peer_ip, lwip_htonl(inifile_config_get_ip("plip", "peer", 0xc0a8fe02)));  // 192.168.254.2
+
+#if !defined(PICO_RP2350)
+  if(!txq && !(txq = pvPortMalloc(TX_SLOTS * sizeof(*txq)))) {
+    debugf("PLIP: no memory for the transmit queue");
+    return;
+  }
+  if(!rxbuf && !(rxbuf = pvPortMalloc(FRAME_MAX))) {
+    debugf("PLIP: no memory for the receive buffer");
+    return;
+  }
+#endif
 
   if(xTaskCreate(plip_task, "plip", 1024, NULL, configMAX_PRIORITIES-10, &task) != pdPASS)
     debugf("PLIP: cannot create task");

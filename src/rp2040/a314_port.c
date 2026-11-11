@@ -68,12 +68,16 @@ static uint8_t peer_mac[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };    // until
 static ip4_addr_t our_ip, peer_ip;
 
 // transmit queue, free running counters. tx_wr is only written under the core lock, tx_rd by the task
-static struct { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; } txq[TX_SLOTS];
+struct txslot { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; };
+#if defined(PICO_RP2350)
+static struct txslot txq[TX_SLOTS];
+#else
+static struct txslot *txq;              // RP2040: from the FreeRTOS heap, only if the A314 is enabled
+#endif
 static uint32_t tx_wr, tx_rd;
 static volatile bool tx_blocked;        // a frame was refused, tcp has to be told when there is room
 static volatile uint32_t tx_drops;
 
-static uint8_t rxbuf[FRAME_MAX] __attribute__((aligned(4)));
 static uint32_t n_rx, n_tx, n_rx_bad;
 
 /* ---- SPI ---- */
@@ -138,13 +142,13 @@ static int a_id(void) {
   return (magic == 0xa3 && ver >= 1 && aw >= 10 && aw <= 16) ? aw : 0;
 }
 
-static void frame_input(uint16_t len);
+static void frame_input(const uint8_t *f, uint16_t len);
 
+// f is the receive buffer of the protocol engine, valid during the call
 static void a_frame_from_amiga(void *ctx, const uint8_t *f, uint16_t len) {
   (void)ctx;
   if(len > FRAME_MAX) { n_rx_bad++; return; }
-  memcpy(rxbuf, f, len);
-  frame_input(len);
+  frame_input(f, len);
 }
 
 /* ---- lwIP side ---- */
@@ -224,23 +228,23 @@ static void arp_input(const uint8_t *f, uint16_t len) {
   __atomic_store_n(&tx_wr, tx_wr + 1, __ATOMIC_RELEASE);
 }
 
-// frame of the Amiga in rxbuf. a314_output() writes tx_wr under the core lock, so an ARP
+// frame of the Amiga. a314_output() writes tx_wr under the core lock, so an ARP
 // reply that is queued from here needs the core lock as well
-static void frame_input(uint16_t len) {
+static void frame_input(const uint8_t *f, uint16_t len) {
   if(len < 14 || len > FRAME_MAX) { n_rx_bad++; return; }
   n_rx++;
 
-  uint16_t type = (rxbuf[12] << 8) | rxbuf[13];
+  uint16_t type = (f[12] << 8) | f[13];
   if(type == ETHTYPE_ARP) {
-    memcpy(peer_mac, rxbuf + 6, 6);
+    memcpy(peer_mac, f + 6, 6);
     LOCK_TCPIP_CORE();
-    arp_input(rxbuf, len);
+    arp_input(f, len);
     UNLOCK_TCPIP_CORE();
   } else if(type == ETHTYPE_IP) {
-    memcpy(peer_mac, rxbuf + 6, 6);
+    memcpy(peer_mac, f + 6, 6);
     struct pbuf *p = pbuf_alloc(PBUF_RAW, len - 14, PBUF_POOL);
     if(!p) { n_rx_bad++; return; }
-    pbuf_take(p, rxbuf + 14, len - 14);
+    pbuf_take(p, f + 14, len - 14);
     if(a314_netif.input(p, &a314_netif) != ERR_OK) pbuf_free(p);
   }
   // everything else, e.g. the magic frames of the driver, is only counted
@@ -343,6 +347,13 @@ void a314_port_init(void) {
   burst = inifile_config_get_int("a314", "burst", 0) != 0;
   ip4_addr_set_u32(&our_ip,  lwip_htonl(inifile_config_get_ip("a314", "ip",   0xc0a8fd01)));  // 192.168.253.1
   ip4_addr_set_u32(&peer_ip, lwip_htonl(inifile_config_get_ip("a314", "peer", 0xc0a8fd02)));  // 192.168.253.2
+
+#if !defined(PICO_RP2350)
+  if(!txq && !(txq = pvPortMalloc(TX_SLOTS * sizeof(*txq)))) {
+    debugf("A314: no memory for the transmit queue");
+    return;
+  }
+#endif
 
   if(xTaskCreate(a314_task, "a314", 1024, NULL, configMAX_PRIORITIES-10, &task) != pdPASS)
     debugf("A314: cannot create task");

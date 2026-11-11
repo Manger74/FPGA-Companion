@@ -6,3 +6,5 @@ typedef uint32_t TickType_t; typedef int BaseType_t;
 #define pdPASS 1
 #define portMAX_DELAY 0xffffffffu
 #define configMAX_PRIORITIES 32
+#include <stdlib.h>
+#define pvPortMalloc(n) malloc(n)
