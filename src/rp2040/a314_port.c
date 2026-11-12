@@ -60,10 +60,13 @@
 // Frames waiting for a free receive buffer of the Amiga. A download from the internet needs room for
 // about (rate x round trip time) frames, e.g. 170 frames/s x 40 ms = 7; with fewer slots frames
 // are dropped all the time and TCP never gets near the rate of the link ("tx queue full").
+// [A314] TXQ sets the number on the RP2350 (2..TX_SLOTS_MAX).
 #if defined(PICO_RP2350)
-#define TX_SLOTS    12      // 18 KB
+#define TX_SLOTS     12     // default, 18 KB
+#define TX_SLOTS_MAX 32     // 48 KB
 #else
-#define TX_SLOTS    3       // the RP2040 has no RAM to spare
+#define TX_SLOTS     3      // the RP2040 has no RAM to spare
+#define TX_SLOTS_MAX 3
 #endif
 #define POLL_MS     50       // the interrupt is the normal trigger, this catches a missed one
 #define FORCE_MS    1000     // service the protocol even without the interrupt bit
@@ -81,11 +84,12 @@ static ip4_addr_t our_ip, peer_ip;
 // transmit queue, free running counters. tx_wr is only written under the core lock, tx_rd by the task
 struct txslot { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; uint32_t t; };
 #if defined(PICO_RP2350)
-static struct txslot txq[TX_SLOTS];
+static struct txslot txq[TX_SLOTS_MAX];
 #else
 static struct txslot *txq;              // RP2040: from the FreeRTOS heap, only if the A314 is enabled
 #endif
 static uint32_t tx_wr, tx_rd;
+static uint32_t tx_slots = TX_SLOTS;    // set once in a314_port_init()
 static volatile bool tx_blocked;        // a frame was refused, tcp has to be told when there is room
 static volatile uint32_t tx_drops;
 
@@ -247,20 +251,20 @@ static err_t a314_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *
   if(p->tot_len > A314_MTU) return ERR_MEM;
 
   uint32_t wr = tx_wr;
-  if(wr - __atomic_load_n(&tx_rd, __ATOMIC_ACQUIRE) >= TX_SLOTS) {
+  if(wr - __atomic_load_n(&tx_rd, __ATOMIC_ACQUIRE) >= tx_slots) {
     tx_drops++;
     tx_blocked = true;
     return ERR_MEM;           // tcp keeps the segment queued, other packets are lost
   }
 
-  uint8_t *f = txq[wr % TX_SLOTS].data;
+  uint8_t *f = txq[wr % tx_slots].data;
   memcpy(f, peer_mac, 6);
   memcpy(f + 6, our_mac, 6);
   f[12] = ETHTYPE_IP >> 8;
   f[13] = ETHTYPE_IP & 0xff;
   pbuf_copy_partial(p, f + 14, p->tot_len, 0);
-  txq[wr % TX_SLOTS].len = 14 + p->tot_len;
-  txq[wr % TX_SLOTS].t = now_us();
+  txq[wr % tx_slots].len = 14 + p->tot_len;
+  txq[wr % tx_slots].t = now_us();
 
   __atomic_store_n(&tx_wr, wr + 1, __ATOMIC_RELEASE);
   if(task) xTaskNotifyGive(task);
@@ -295,8 +299,8 @@ static void arp_input(const uint8_t *f, uint16_t len) {
   memcpy(&dip, &arp->dipaddr, 4);
   if(ip4_addr_isany_val(sip) || ip4_addr_cmp(&dip, &peer_ip)) return;   // probe or its own address
 
-  uint8_t *r = txq[tx_wr % TX_SLOTS].data;
-  if(tx_wr - __atomic_load_n(&tx_rd, __ATOMIC_ACQUIRE) >= TX_SLOTS) return;
+  uint8_t *r = txq[tx_wr % tx_slots].data;
+  if(tx_wr - __atomic_load_n(&tx_rd, __ATOMIC_ACQUIRE) >= tx_slots) return;
 
   memcpy(r, arp->shwaddr.addr, 6);
   memcpy(r + 6, our_mac, 6);
@@ -312,7 +316,7 @@ static void arp_input(const uint8_t *f, uint16_t len) {
   memcpy(&a->sipaddr, &dip, 4);
   memcpy(a->dhwaddr.addr, arp->shwaddr.addr, 6);
   memcpy(&a->dipaddr, &sip, 4);
-  txq[tx_wr % TX_SLOTS].len = 14 + SIZEOF_ETHARP_HDR;
+  txq[tx_wr % tx_slots].len = 14 + SIZEOF_ETHARP_HDR;
   __atomic_store_n(&tx_wr, tx_wr + 1, __ATOMIC_RELEASE);
 }
 
@@ -358,8 +362,8 @@ static void service(bool force) {
 
   for(int round = 0; round < 8 && tx_rd != __atomic_load_n(&tx_wr, __ATOMIC_ACQUIRE) && a314_can_send(&proto); round++) {
     uint32_t rd = tx_rd;
-    if(!a314_send_frame(&proto, txq[rd % TX_SLOTS].data, txq[rd % TX_SLOTS].len)) break;
-    tadd(&s_dl_queue, now_us() - txq[rd % TX_SLOTS].t);
+    if(!a314_send_frame(&proto, txq[rd % tx_slots].data, txq[rd % tx_slots].len)) break;
+    tadd(&s_dl_queue, now_us() - txq[rd % tx_slots].t);
     __atomic_store_n(&tx_rd, rd + 1, __ATOMIC_RELEASE);
     n_tx++;
 
@@ -398,8 +402,9 @@ static void a314_task(void *arg) {
   UNLOCK_TCPIP_CORE();
 
   char ours[IP4ADDR_STRLEN_MAX], his[IP4ADDR_STRLEN_MAX];
-  debugf("A314: up, %u bytes RAM, companion %s, amiga %s, burst %s", (unsigned)(1UL << aw),
-	 ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)), ip4addr_ntoa_r(&peer_ip, his, sizeof(his)), burst ? "on" : "off");
+  debugf("A314: up, %u bytes RAM, companion %s, amiga %s, burst %s, txq %u", (unsigned)(1UL << aw),
+	 ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)), ip4addr_ntoa_r(&peer_ip, his, sizeof(his)), burst ? "on" : "off",
+	 (unsigned)tx_slots);
 
   TickType_t last_stats = xTaskGetTickCount(), last_lan = last_stats, last_force = last_stats;
   t_stats = now_us();
@@ -446,6 +451,9 @@ void a314_port_init(void) {
   burst = inifile_config_get_int("a314", "burst", 0) != 0;
   int st = inifile_config_get_int("a314", "stats", STATS_MS / 1000);
   stats_ms = (st < 1 ? 1 : st) * 1000;
+  int q = inifile_config_get_int("a314", "txq", TX_SLOTS);
+  tx_slots = q < 2 ? 2 : q > TX_SLOTS_MAX ? TX_SLOTS_MAX : q;
+  if(tx_slots != (uint32_t)q) debugf("A314: TXQ %d not possible, using %u", q, (unsigned)tx_slots);
   ip4_addr_set_u32(&our_ip,  lwip_htonl(inifile_config_get_ip("a314", "ip",   0xc0a8fd01)));  // 192.168.253.1
   ip4_addr_set_u32(&peer_ip, lwip_htonl(inifile_config_get_ip("a314", "peer", 0xc0a8fd02)));  // 192.168.253.2
 

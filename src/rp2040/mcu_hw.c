@@ -1402,7 +1402,14 @@ static void mcu_hw_wifi_init(void) {
   cyw43_arch_enable_sta_mode();
   debugf("STA mode enabled");
 
-  cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  // [WIFI] POWERSAVE=0: the radio never sleeps. With the default power save mode frames
+  // to us wait until the radio wakes up again, which adds tens of ms to a round trip
+  if(inifile_config_get_int("wifi", "powersave", 1)) {
+    cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  } else {
+    cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
+    debugf("WiFi: power save off");
+  }
 
   // After a reset the access point may still hold the old association. Some (seen on a
   // Qualcomm based one) then drop the first authentication while they clear it. Phones send

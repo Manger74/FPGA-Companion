@@ -427,6 +427,7 @@ static const struct {
   // wifi settings
   { "WIFI", "SSID", CONFIG_TYPE_STRING, NULL },
   { "WIFI", "PASS", CONFIG_TYPE_STRING, NULL },
+  { "WIFI", "POWERSAVE", CONFIG_TYPE_INT, NULL },     // 0: radio always awake (lower latency)
 
   // (S)NTP
   { "NTP", "IP", CONFIG_TYPE_IP, NULL },
@@ -446,6 +447,8 @@ static const struct {
   { "A314", "IP", CONFIG_TYPE_IP, NULL },
   { "A314", "PEER", CONFIG_TYPE_IP, NULL },
   { "A314", "BURST", CONFIG_TYPE_INT, NULL },
+  { "A314", "STATS", CONFIG_TYPE_INT, NULL },
+  { "A314", "TXQ", CONFIG_TYPE_INT, NULL },
 
   // MENU/OSD
   { "MENU", "GAMEPAD_TRIGGER", CONFIG_TYPE_INT, NULL },  
