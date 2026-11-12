@@ -43,7 +43,15 @@ struct a314_ops {
   void (*irq_write)(void *ctx, uint8_t val);
   // ethernet frame the Amiga wants to send (valid until return)
   void (*frame_from_amiga)(void *ctx, const uint8_t *frame, uint16_t len);
+  // optional (may be NULL): buffer events for timing statistics, addr = frame buffer of the Amiga
+  void (*event)(void *ctx, uint8_t ev, uint16_t addr);
 };
+
+// events for a314_ops.event
+#define A314_EV_RX_FREE    1     // READ_FRAME_REQ: the Amiga offers an empty receive buffer
+#define A314_EV_RX_FILLED  2     // a frame has been written to that buffer and announced
+#define A314_EV_TX_REQ     3     // WRITE_FRAME_REQ: the Amiga has a frame to send in a buffer
+#define A314_EV_TX_DONE    4     // the frame has been taken, the buffer goes back to the Amiga
 
 struct a314_pkt {
   uint8_t len, type, stream;

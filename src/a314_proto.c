@@ -33,6 +33,10 @@
 
 static const char service_name[] = "ethernet";
 
+static void ev(struct a314 *a, uint8_t e, uint16_t addr) {
+  if(a->ops.event) a->ops.event(a->ops.ctx, e, addr);
+}
+
 void a314_init(struct a314 *a, const struct a314_ops *ops, uint32_t ram_size) {
   memset(a, 0, sizeof(*a));
   a->ops = *ops;
@@ -101,16 +105,19 @@ static void handle_data(struct a314 *a, const uint8_t *d, uint8_t len) {
   uint16_t kind = (d[6] << 8) | d[7];
 
   if(kind == WRITE_FRAME_REQ) {
+    ev(a, A314_EV_TX_REQ, addr);
     if(frame_ok(a, addr, flen)) {
       a->ops.mem_read(a->ops.ctx, addr, a->buf + 256, flen);
       a->ops.frame_from_amiga(a->ops.ctx, a->buf + 256, flen);
       a->st_from_amiga++;
     } else a->st_dropped++;                          // the buffer is given back in any case
     put_frame_msg(a, addr, flen, WRITE_FRAME_RES);
+    ev(a, A314_EV_TX_DONE, addr);
   } else if(kind == READ_FRAME_REQ) {
     // flen is the size of the buffer; a buffer that is not usable is simply never filled
     if(addr + A314_FRAME_MAX <= a->ram_size && flen >= A314_FRAME_MAX && a->n_rx < A314_RX_SLOTS) {
       a->rx[a->n_rx].addr = addr; a->rx[a->n_rx].len = flen; a->n_rx++;
+      ev(a, A314_EV_RX_FREE, addr);
     } else a->st_dropped++;
   }
 }
@@ -215,5 +222,6 @@ bool a314_send_frame(struct a314 *a, const uint8_t *frame, uint16_t len) {
   // of r2a_head, so a fresh copy is needed before writing
   a->ops.mem_read(a->ops.ctx, CAP_BASE + CAP_R2A_HEAD, &a->cap[CAP_R2A_HEAD], 1);
   flush_r2a(a);
+  ev(a, A314_EV_RX_FILLED, addr);
   return true;
 }

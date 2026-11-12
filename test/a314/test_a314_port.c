@@ -208,6 +208,13 @@ int main(int argc, char **argv) {
   { uint8_t m[8]; put_msg(m, 520 + 2 * 1520, 10, 2); a_send_pkt(6, eth_stream, 8, m); buf_pending[2] = true; pump(); }
   CHECK(!buf_pending[2], "short frame: buffer given back");
 
+  // 9b. timing statistics: every kind of buffer event has been seen, the report resets them
+  CHECK(s_dl_amiga.n > 0 && s_dl_queue.n > 0 && s_ul_comp.n > 0 && s_ul_amiga.n > 0,
+	"timing: download (amiga, queue) and upload (amiga, companion) measured");
+  CHECK(s_ul_amiga.n < s_ul_comp.n, "timing: first use of a send buffer has no amiga time");
+  timing_report();
+  CHECK(!s_dl_amiga.n && !s_dl_queue.n && !s_ul_comp.n && !s_ul_amiga.n && !t_busy, "timing: report resets the sums");
+
   // 10. Amiga reset: link goes through the restart and works again
   sim_clear_amiga();
   a_start(); pump();

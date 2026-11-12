@@ -19,6 +19,17 @@
                        IP=...     address of the Companion on this link, default 192.168.253.1
                        PEER=...   address of the Amiga, default 192.168.253.2
                        BURST=1    write frames to the core as one SPI block without gaps (default 0)
+                       STATS=n    statistics every n seconds while frames flow (default 30)
+
+  Timing statistics (where a frame waits, all times in us, avg/max):
+    download  amiga   frame written to a receive buffer -> the Amiga offers that buffer again
+              queue   frame from the network -> written to the Amiga
+              nobuf   share of the time with frames queued but no free receive buffer of the Amiga
+    upload    amiga   send buffer given back -> the Amiga sends the next frame from it
+              comp    WRITE_FRAME_REQ seen -> frame taken and handed to lwIP (SPI read + lwIP)
+    irq       interrupt of the core -> a314 task running
+    busy      share of the time the a314 task works (SPI + protocol)
+  The times on the Amiga side include the way over the Companion (interrupt, SPI status).
 */
 
 #include "a314_port.h"
@@ -56,7 +67,7 @@
 #endif
 #define POLL_MS     50       // the interrupt is the normal trigger, this catches a missed one
 #define FORCE_MS    1000     // service the protocol even without the interrupt bit
-#define STATS_MS    30000
+#define STATS_MS    30000    // default of [A314] STATS
 
 static struct netif a314_netif;
 static TaskHandle_t task;
@@ -68,7 +79,7 @@ static uint8_t peer_mac[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };    // until
 static ip4_addr_t our_ip, peer_ip;
 
 // transmit queue, free running counters. tx_wr is only written under the core lock, tx_rd by the task
-struct txslot { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; };
+struct txslot { uint8_t data[FRAME_MAX] __attribute__((aligned(4))); uint16_t len; uint32_t t; };
 #if defined(PICO_RP2350)
 static struct txslot txq[TX_SLOTS];
 #else
@@ -81,6 +92,81 @@ static volatile uint32_t tx_drops;
 static uint32_t n_rx, n_tx, n_rx_bad;
 
 /* ---- SPI ---- */
+
+/* ---- timing statistics ---- */
+
+struct tsum { uint32_t sum, max, n; };
+static void tadd(struct tsum *t, uint32_t us) { t->sum += us; if(us > t->max) t->max = us; t->n++; }
+static unsigned tavg(const struct tsum *t) { return t->n ? t->sum / t->n : 0; }
+static uint32_t now_us(void) { return (uint32_t)mcu_hw_micros(); }
+
+// when a frame buffer of the Amiga was given to the Amiga, by buffer address
+#define TBUFS 8
+struct tbuf { uint16_t addr; uint32_t t; };
+static struct tbuf tb_rx[TBUFS], tb_tx[TBUFS];
+static void tb_set(struct tbuf *tb, uint16_t addr, uint32_t t) {
+  int free = -1;
+  for(int i = 0; i < TBUFS; i++) {
+    if(tb[i].addr == addr) { tb[i].t = t; return; }
+    if(!tb[i].addr && free < 0) free = i;
+  }
+  if(free >= 0) { tb[free].addr = addr; tb[free].t = t; }
+}
+static bool tb_take(struct tbuf *tb, uint16_t addr, uint32_t *t) {
+  for(int i = 0; i < TBUFS; i++)
+    if(tb[i].addr == addr) { *t = tb[i].t; tb[i].addr = 0; return true; }
+  return false;
+}
+
+static struct tsum s_dl_amiga, s_dl_queue, s_ul_amiga, s_ul_comp, s_irq;
+static uint32_t t_busy, t_nobuf, t_nobuf_start, t_txreq, t_stats;
+static bool nobuf;
+static volatile uint32_t t_irq;
+static volatile bool irq_seen;
+
+static void a_event(void *ctx, uint8_t ev, uint16_t addr) {
+  (void)ctx;
+  uint32_t now = now_us(), t0;
+  switch(ev) {
+  case A314_EV_RX_FILLED: tb_set(tb_rx, addr, now); break;
+  case A314_EV_RX_FREE:   if(tb_take(tb_rx, addr, &t0)) tadd(&s_dl_amiga, now - t0); break;
+  case A314_EV_TX_REQ:    if(tb_take(tb_tx, addr, &t0)) tadd(&s_ul_amiga, now - t0); t_txreq = now; break;
+  case A314_EV_TX_DONE:   tadd(&s_ul_comp, now - t_txreq); tb_set(tb_tx, addr, now); break;
+  }
+}
+
+// frames queued but no receive buffer of the Amiga: start or end of such a time
+static void nobuf_track(bool waiting, uint32_t now) {
+  if(waiting && !nobuf) { nobuf = true; t_nobuf_start = now; }
+  else if(!waiting && nobuf) { nobuf = false; t_nobuf += now - t_nobuf_start; }
+}
+
+static void timing_reset(void) {
+  memset(&s_dl_amiga, 0, sizeof(struct tsum)); memset(&s_dl_queue, 0, sizeof(struct tsum));
+  memset(&s_ul_amiga, 0, sizeof(struct tsum)); memset(&s_ul_comp, 0, sizeof(struct tsum));
+  memset(&s_irq, 0, sizeof(struct tsum));
+  t_busy = t_nobuf = 0;
+  t_stats = now_us();
+  if(nobuf) t_nobuf_start = t_stats;
+}
+
+static void timing_report(void) {
+  uint32_t now = now_us(), span = now - t_stats;
+  if(nobuf) { t_nobuf += now - t_nobuf_start; t_nobuf_start = now; }
+  unsigned pct_nobuf = span ? (unsigned)((uint64_t)t_nobuf * 100 / span) : 0;
+  unsigned pct_busy  = span ? (unsigned)((uint64_t)t_busy * 100 / span) : 0;
+
+  debugf("A314: download: amiga %u/%u us (%u), queue %u/%u us, nobuf %u%%",
+	 tavg(&s_dl_amiga), (unsigned)s_dl_amiga.max, (unsigned)s_dl_amiga.n,
+	 tavg(&s_dl_queue), (unsigned)s_dl_queue.max, pct_nobuf);
+  debugf("A314: upload: amiga %u/%u us (%u), comp %u/%u us",
+	 tavg(&s_ul_amiga), (unsigned)s_ul_amiga.max, (unsigned)s_ul_amiga.n,
+	 tavg(&s_ul_comp), (unsigned)s_ul_comp.max);
+  debugf("A314: irq %u/%u us (%u), busy %u%%",
+	 tavg(&s_irq), (unsigned)s_irq.max, (unsigned)s_irq.n, pct_busy);
+
+  timing_reset();
+}
 
 static void a_begin(uint8_t cmd) {
   mcu_hw_spi_begin();
@@ -98,6 +184,7 @@ static uint8_t a_status(void) {
 // time spent in the SPI transfer of whole frames (everything of FRAME_XFER bytes or more)
 #define FRAME_XFER 256
 static bool burst;                       // [A314] BURST=1: frames are written to the core as one block
+static uint32_t stats_ms = STATS_MS;     // [A314] STATS
 static uint32_t t_wr_us, n_wr, t_rd_us, n_rd;
 
 static void a_mem_read(void *ctx, uint16_t addr, uint8_t *dst, uint16_t len) {
@@ -173,6 +260,7 @@ static err_t a314_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *
   f[13] = ETHTYPE_IP & 0xff;
   pbuf_copy_partial(p, f + 14, p->tot_len, 0);
   txq[wr % TX_SLOTS].len = 14 + p->tot_len;
+  txq[wr % TX_SLOTS].t = now_us();
 
   __atomic_store_n(&tx_wr, wr + 1, __ATOMIC_RELEASE);
   if(task) xTaskNotifyGive(task);
@@ -265,17 +353,23 @@ static void report(void) {
 }
 
 static void service(bool force) {
+  uint32_t t0 = now_us();
   if(force || (a_status() & 1)) { a314_service(&proto); report(); }
 
   for(int round = 0; round < 8 && tx_rd != __atomic_load_n(&tx_wr, __ATOMIC_ACQUIRE) && a314_can_send(&proto); round++) {
     uint32_t rd = tx_rd;
     if(!a314_send_frame(&proto, txq[rd % TX_SLOTS].data, txq[rd % TX_SLOTS].len)) break;
+    tadd(&s_dl_queue, now_us() - txq[rd % TX_SLOTS].t);
     __atomic_store_n(&tx_rd, rd + 1, __ATOMIC_RELEASE);
     n_tx++;
 
     // room again: let tcp send what was refused (try again at the next frame if the mailbox is full)
     if(tx_blocked && tcpip_try_callback(tx_resume, NULL) == ERR_OK) tx_blocked = false;
   }
+
+  uint32_t t1 = now_us();
+  nobuf_track(tx_rd != __atomic_load_n(&tx_wr, __ATOMIC_ACQUIRE) && !a314_can_send(&proto), t1);
+  t_busy += t1 - t0;
 }
 
 static void a314_task(void *arg) {
@@ -289,7 +383,7 @@ static void a314_task(void *arg) {
     vTaskDelete(NULL);
     return;
   }
-  struct a314_ops ops = { NULL, a_mem_read, a_mem_write, a_irq_write, a_frame_from_amiga };
+  struct a314_ops ops = { NULL, a_mem_read, a_mem_write, a_irq_write, a_frame_from_amiga, a_event };
   a314_init(&proto, &ops, 1UL << aw);
 
   LOCK_TCPIP_CORE();
@@ -308,10 +402,12 @@ static void a314_task(void *arg) {
 	 ip4addr_ntoa_r(&our_ip, ours, sizeof(ours)), ip4addr_ntoa_r(&peer_ip, his, sizeof(his)), burst ? "on" : "off");
 
   TickType_t last_stats = xTaskGetTickCount(), last_lan = last_stats, last_force = last_stats;
+  t_stats = now_us();
   uint32_t last_rx = 0, last_tx = 0;
 
   for(;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(POLL_MS));
+    if(irq_seen) { irq_seen = false; tadd(&s_irq, now_us() - t_irq); }
 
     TickType_t now = xTaskGetTickCount();
     bool force = now - last_force >= pdMS_TO_TICKS(FORCE_MS);
@@ -324,7 +420,7 @@ static void a314_task(void *arg) {
       ppp_port_peer_poll(PEER_A314);
       UNLOCK_TCPIP_CORE();
     }
-    if(now - last_stats >= pdMS_TO_TICKS(STATS_MS)) {
+    if(now - last_stats >= pdMS_TO_TICKS(stats_ms)) {
       last_stats = now;
       if(n_rx != last_rx || n_tx != last_tx)
       {
@@ -335,7 +431,10 @@ static void a314_task(void *arg) {
 	debugf("A314: spi per frame: write %u us (%u frames), read %u us (%u frames)",
 	       (unsigned)(n_wr ? t_wr_us / n_wr : 0), (unsigned)n_wr, (unsigned)(n_rd ? t_rd_us / n_rd : 0), (unsigned)n_rd);
 	t_wr_us = n_wr = t_rd_us = n_rd = 0;
-      }
+	timing_report();
+      } else
+	timing_reset();
+
       last_rx = n_rx; last_tx = n_tx;
     }
   }
@@ -345,6 +444,8 @@ void a314_port_init(void) {
   if(task || !inifile_config_get_int("a314", "enable", 0)) return;
 
   burst = inifile_config_get_int("a314", "burst", 0) != 0;
+  int st = inifile_config_get_int("a314", "stats", STATS_MS / 1000);
+  stats_ms = (st < 1 ? 1 : st) * 1000;
   ip4_addr_set_u32(&our_ip,  lwip_htonl(inifile_config_get_ip("a314", "ip",   0xc0a8fd01)));  // 192.168.253.1
   ip4_addr_set_u32(&peer_ip, lwip_htonl(inifile_config_get_ip("a314", "peer", 0xc0a8fd02)));  // 192.168.253.2
 
@@ -360,5 +461,6 @@ void a314_port_init(void) {
 }
 
 void a314_handle_event(void) {
+  if(!irq_seen) { t_irq = now_us(); irq_seen = true; }
   if(task) xTaskNotifyGive(task);
 }
