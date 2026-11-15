@@ -51,10 +51,18 @@
 #define TCP_SND_BUF                 (MAX_CONCURRENT_CX_HINT * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define TCP_LISTEN_BACKLOG          1
+#ifdef ENABLE_TLSTUN
+// TLS tunnel: two connections per session plus one listener per port
+#define MEMP_NUM_TCP_SEG            64
+#define MEMP_NUM_NETCONN            (8 + 2*TLSTUN_MAX_SESSIONS + TLSTUN_MAX_MAPS)
+#define MEMP_NUM_TCP_PCB            (MAX_CONCURRENT_CX_HINT + 2*TLSTUN_MAX_SESSIONS)
+#define MEMP_NUM_TCP_PCB_LISTEN     (NUM_SERVER_HINT + TLSTUN_MAX_MAPS)
+#else
 #define MEMP_NUM_TCP_SEG            32
 #define MEMP_NUM_NETCONN            8
 #define MEMP_NUM_TCP_PCB            (MAX_CONCURRENT_CX_HINT)
 #define MEMP_NUM_TCP_PCB_LISTEN     (NUM_SERVER_HINT)
+#endif
 
 #define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    1

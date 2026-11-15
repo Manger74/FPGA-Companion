@@ -880,8 +880,15 @@ static void netif_status_callback(struct netif *netif) {
 /* Number of seconds between 1970 and Feb 7, 2036 06:28:16 UTC (epoch 1) */
 #define DIFF_SEC_1970_2036          ((u32_t)2085978496L)
 
+#ifdef ENABLE_TLSTUN
+#include "../tlstun.h"
+#endif
+
 void sntp_set_system_time(u32_t sec) {
   debugf("%s(%lu)", __FUNCTION__, sec);
+#ifdef ENABLE_TLSTUN
+  tlstun_set_time(sec);   // UTC, for certificate validity checks
+#endif
 
   time_t ut = sec + 3600 * inifile_config_get_int("ntp", "timezone", 0);
   struct tm* timeinfo = gmtime(&ut);

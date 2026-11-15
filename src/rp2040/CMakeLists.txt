@@ -48,6 +48,9 @@ else()
    set(TARGET rp2040)
 endif()
 
+# mbedtls config for the TLS tunnel (RP2350 only), must be set before pico_sdk_init()
+set(PICO_MBEDTLS_CONFIG_FILE "tlstun_mbedtls_config.h")
+
 # Pull in SDK (must be before project)
 include(./pico_sdk_import.cmake)
 
@@ -183,6 +186,13 @@ target_link_libraries(${PROJECT} PRIVATE pico_cyw43_arch_lwip_sys_freertos)
 target_link_libraries(${PROJECT} PRIVATE pico_btstack_cyw43 pico_btstack_classic)
 target_link_libraries(${PROJECT} PRIVATE tinyusb_host tinyusb_board u8g2)
 target_link_libraries(${PROJECT} PRIVATE pico_lwip_sntp)
+
+# TLS tunnel needs the RAM of the RP2350 and networking
+if("${TARGET}" STREQUAL "rp2350")
+   target_sources(${PROJECT} PRIVATE ../tlstun.c)
+   target_compile_definitions(${PROJECT} PRIVATE ENABLE_TLSTUN TLSTUN_MAX_MAPS=4 TLSTUN_MAX_SESSIONS=3)
+   target_link_libraries(${PROJECT} PRIVATE pico_mbedtls)
+endif()
 
 pico_add_extra_outputs(${PROJECT})
 pico_enable_stdio_usb(${PROJECT} 0)

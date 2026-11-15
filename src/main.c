@@ -13,6 +13,9 @@
 #include "../debug.h"
 #include "../ftpd.h"
 #include "../telnetd.h"
+#ifdef ENABLE_TLSTUN
+#include "../tlstun.h"
+#endif
 #include "../xml.h"
 #include "../at_wifi.h"
 #ifdef ENABLE_PPP_SERVER
@@ -101,6 +104,9 @@ static void com_task(__attribute__((unused)) void *p ) {
       debugf("Image upload in progress, delaying ready action");
 
     ftpd_init();
+#ifdef ENABLE_TLSTUN
+    tlstun_init();
+#endif
     
     // finally prepare for wifi communication
     at_wifi_init();

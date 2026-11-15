@@ -450,6 +450,11 @@ static const struct {
   { "A314", "STATS", CONFIG_TYPE_INT, NULL },
   { "A314", "TXQ", CONFIG_TYPE_INT, NULL },
 
+  // TLS tunnel
+  { "TLSTUN", "MAP", CONFIG_TYPE_STRING, NULL },
+  { "TLSTUN", "CA", CONFIG_TYPE_STRING, NULL },
+  { "TLSTUN", "VERIFY", CONFIG_TYPE_CHOICE, "required,none" },
+
   // MENU/OSD
   { "MENU", "GAMEPAD_TRIGGER", CONFIG_TYPE_INT, NULL },  
   { "MENU", "HOTKEY", CONFIG_TYPE_HIDKEY, NULL },

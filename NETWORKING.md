@@ -103,3 +103,23 @@ requests of the Amiga with its own address and answers requests for ```PEER``` o
 network (proxy ARP), so the router needs no extra route and does the NAT to the internet.
 The Companion prints a statistic line (frames in the core and here) every 30 s while
 traffic flows. Host test: ```test/plip/run.sh```.
+
+## TLS tunnel (RP2350 only)
+
+On the Pico2/Pico2-W the Companion can forward plain TCP connections to
+TLS servers, so the core's machine can use TLS-only services (IMAPS, SMTPS,
+...) without doing TLS itself. Each `MAP` entry is `localport:host:port`:
+
+```
+[TLSTUN]
+MAP=993:imap.example.com:993,465:smtp.example.com:465
+CA=cacert.pem        ; PEM root certificates on the SD card
+VERIFY=required      ; or none (testing only)
+```
+
+The client then connects without TLS to the Companion's IP on the local
+port. Over A314 this is the Companion's address on the A314 link
+(`[A314] IP`, default 192.168.253.1). Only TLS 1.2 is supported. Keep `cacert.pem` small and only include
+the root certificates actually needed, since every certificate stays in RAM.
+With `VERIFY=required` connections are refused until the time has been
+received via NTP. Up to three tunnels can be active at the same time.
