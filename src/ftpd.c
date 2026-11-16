@@ -8,9 +8,11 @@
  * PORT gets 502).
  *
  * Implemented: USER PASS SYST FEAT PWD CWD CDUP TYPE PASV LIST NLST RETR
- * STOR DELE MKD RMD RNFR RNTO SIZE REST NOOP QUIT. All paths are relative to
- * CARD_MOUNTPOINT and accessed directly via FatFs, serialized with
- * sdc_lock()/sdc_unlock() the same way sdc.c guards the card. Files
+ * STOR DELE MKD RMD RNFR RNTO SIZE REST NOOP QUIT. The FTP root is a
+ * virtual directory holding one entry per volume: "SD-Card" (always) and
+ * "USB-Drive" (only while a USB mass storage device is present). Volumes
+ * are accessed directly via FatFs, serialized with sdc_lock()/sdc_unlock()
+ * the same way sdc.c guards the card. Files
  * currently mounted as a disk/rom image on any drive are protected from
  * STOR/DELE/RNTO (550).
  */
@@ -30,6 +32,7 @@
 
 #include "debug.h"
 #include "sdc.h"
+#include "mcu_hw.h"
 
 #include "ftpd.h"
 
@@ -40,7 +43,8 @@
 #define XFER_CHUNK           4096
 #endif
 #define CWD_MAX              128
-#define FPATH_MAX            (CWD_MAX + 16)   /* CARD_MOUNTPOINT + '/' + relative path */
+#define FPATH_MAX            (CWD_MAX + 16)   /* mountpoint + '/' + relative path */
+#define USB_MOUNTPOINT       "/usb"           /* mounted by menu.c on USB MSC event */
 #define FTPD_STACK_WORDS     1024
 #define FTPS_STACK_WORDS     3072
 
@@ -53,7 +57,7 @@
 typedef struct {
     int     ctl;                      /* control connection        */
     int     pasv;                     /* passive listener          */
-    char    cwd[CWD_MAX];             /* "" = volume root          */
+    char    cwd[CWD_MAX];             /* "" = virtual root         */
     char    rnfr[CWD_MAX];            /* pending RNFR source       */
     uint32_t restart_at;               /* pending REST offset, 0 = none */
     uint8_t xbuf[XFER_CHUNK];
@@ -62,35 +66,51 @@ typedef struct {
 
 static ftps_t s_sess[MAX_SESSIONS];
 
-/* build the absolute FatFs path for a volume-root-relative FTP path */
-static void full_path(const char *rel, char *out, size_t cap)
+/* volumes shown in the virtual FTP root */
+static const struct { const char *name, *mp; } k_vol[] = {
+    { "SD-Card",   CARD_MOUNTPOINT },
+    { "USB-Drive", USB_MOUNTPOINT  },
+};
+#define NUM_VOL (sizeof(k_vol) / sizeof(k_vol[0]))
+
+static bool vol_avail(unsigned v)
 {
-    if (rel[0])
-        snprintf(out, cap, "%s/%s", CARD_MOUNTPOINT, rel);
-    else
-        snprintf(out, cap, "%s", CARD_MOUNTPOINT);
+    return v == 0 || mcu_hw_usb_msc_present();
 }
 
-/* true if 'path' (volume-root-relative) is currently mounted as a
- * disk/rom image on any drive, and thus must not be touched */
-static bool disk_path_mounted(const char *path)
+/* full_path() result */
+#define P_BAD   -1    /* unknown or unavailable volume */
+#define P_ROOT   0    /* virtual root                  */
+#define P_VOL    1    /* top directory of a volume     */
+#define P_FILE   2    /* object inside a volume        */
+
+/* map a normalized FTP path (see resolve()) to an absolute FatFs path */
+static int full_path(const char *rel, char *out, size_t cap)
+{
+    for (unsigned v = 0; v < NUM_VOL; v++) {
+        size_t n = strlen(k_vol[v].name);
+        if (strncasecmp(rel, k_vol[v].name, n) || (rel[n] && rel[n] != '/'))
+            continue;
+        if (!vol_avail(v))
+            return P_BAD;
+        snprintf(out, cap, "%s%s", k_vol[v].mp, rel + n);
+        return rel[n] ? P_FILE : P_VOL;
+    }
+    return rel[0] ? P_BAD : P_ROOT;
+}
+
+/* true if FatFs path 'full' is currently mounted as a disk/rom image on
+ * any drive, and thus must not be touched */
+static bool disk_path_mounted(const char *full)
 {
     for (int d = 0; d < MAX_DRIVES + MAX_IMAGES; d++) {
         char *name = sdc_get_image_name(d);
         if (!name)
             continue;
         char *cwd = sdc_get_cwd(d);
-        char full[FPATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", cwd ? cwd : CARD_MOUNTPOINT, name);
-
-        const char *rel = full;
-        size_t mlen = strlen(CARD_MOUNTPOINT);
-        if (!strncmp(rel, CARD_MOUNTPOINT, mlen))
-            rel += mlen;
-        while (*rel == '/')
-            rel++;
-
-        if (!strcasecmp(rel, path))
+        char img[FPATH_MAX];
+        snprintf(img, sizeof(img), "%s/%s", cwd ? cwd : CARD_MOUNTPOINT, name);
+        if (!strcasecmp(img, full))
             return true;
     }
     return false;
@@ -242,11 +262,43 @@ typedef enum {
     LIST_DATA_ERROR,
 } list_result_t;
 
+static int fmt_entry(char *line, size_t cap, bool names_only, bool is_dir,
+                     unsigned long size, WORD fdate, const char *name)
+{
+    if (names_only)
+        return snprintf(line, cap, "%s\r\n", name);
+    int yr = 1980 + ((fdate >> 9) & 0x7F);
+    int mo = (fdate >> 5) & 0x0F;
+    int dy = fdate & 0x1F;
+    if (mo < 1 || mo > 12)
+        mo = 1;
+    return snprintf(line, cap, "%crw-r--r--   1 fpga fpga %10lu %s %2d  %4d %s\r\n",
+                    is_dir ? 'd' : '-', size, k_mon[mo - 1], dy, yr, name);
+}
+
+/* virtual root: one directory entry per available volume */
+static list_result_t send_root_list(int dfd, bool names_only)
+{
+    char line[64];
+    for (unsigned v = 0; v < NUM_VOL; v++) {
+        if (!vol_avail(v))
+            continue;
+        int n = fmt_entry(line, sizeof(line), names_only, true, 0, 0x21, k_vol[v].name);
+        if (n > 0 && !send_all(dfd, line, (size_t)n))
+            return LIST_DATA_ERROR;
+    }
+    return LIST_OK;
+}
+
 static list_result_t send_list(int dfd, const char *path, bool names_only,
                                uint8_t *out, size_t out_cap)
 {
     char full[FPATH_MAX];
-    full_path(path, full, sizeof(full));
+    int kind = full_path(path, full, sizeof(full));
+    if (kind == P_ROOT)
+        return send_root_list(dfd, names_only);
+    if (kind == P_BAD)
+        return LIST_FILESYSTEM_ERROR;
 
 #ifdef ESP_PLATFORM
     FF_DIR dir;
@@ -278,20 +330,8 @@ static list_result_t send_list(int dfd, const char *path, bool names_only,
             continue;
 
         char line[384];
-        int n;
-        if (names_only) {
-            n = snprintf(line, sizeof(line), "%s\r\n", fno.fname);
-        } else {
-            int yr = 1980 + ((fno.fdate >> 9) & 0x7F);
-            int mo = (fno.fdate >> 5) & 0x0F;
-            int dy = fno.fdate & 0x1F;
-            if (mo < 1 || mo > 12)
-                mo = 1;
-            n = snprintf(line, sizeof(line),
-                         "%crw-r--r--   1 fpga fpga %10lu %s %2d  %4d %s\r\n",
-                         (fno.fattrib & AM_DIR) ? 'd' : '-',
-                         (unsigned long)fno.fsize, k_mon[mo - 1], dy, yr, fno.fname);
-        }
+        int n = fmt_entry(line, sizeof(line), names_only, fno.fattrib & AM_DIR,
+                          (unsigned long)fno.fsize, fno.fdate, fno.fname);
         if (n < 0)
             continue;
         if ((size_t)n >= sizeof(line))
@@ -327,14 +367,14 @@ static list_result_t send_list(int dfd, const char *path, bool names_only,
 static void do_retr(ftps_t *fs, const char *path)
 {
     char full[FPATH_MAX];
-    full_path(path, full, sizeof(full));
+    bool valid = full_path(path, full, sizeof(full)) == P_FILE;
 
     uint32_t restart_at = fs->restart_at;
     fs->restart_at = 0;                 /* REST only applies to the next transfer */
 
     FIL f;
     sdc_lock();
-    if (f_open(&f, full, FA_OPEN_EXISTING | FA_READ) != FR_OK) {
+    if (!valid || f_open(&f, full, FA_OPEN_EXISTING | FA_READ) != FR_OK) {
         sdc_unlock();
         reply(fs, "550 Not found.");
         return;
@@ -386,16 +426,20 @@ static void do_retr(ftps_t *fs, const char *path)
 
 static void do_stor(ftps_t *fs, const char *path)
 {
+    char full[FPATH_MAX];
+    if (full_path(path, full, sizeof(full)) != P_FILE) {
+        fs->restart_at = 0;
+        reply(fs, "550 Cannot create file.");
+        return;
+    }
+
     sdc_lock();
-    bool mounted = disk_path_mounted(path);
+    bool mounted = disk_path_mounted(full);
     sdc_unlock();
     if (mounted) {
         reply(fs, "550 File is a mounted disk image; eject it first.");
         return;
     }
-
-    char full[FPATH_MAX];
-    full_path(path, full, sizeof(full));
 
     uint32_t restart_at = fs->restart_at;
     fs->restart_at = 0;                 /* REST only applies to the next transfer */
@@ -512,10 +556,21 @@ static void session(ftps_t *fs)
                 replyf(fs, "257 \"/%s\"", fs->cwd);
             } else if (!strcmp(line, "CWD")) {
                 if (resolve(fs, arg, path, sizeof(path))) {
-                    bool valid = !path[0];      /* volume root is always valid */
-                    if (!valid) {
-                        char full[FPATH_MAX];
-                        full_path(path, full, sizeof(full));
+                    char full[FPATH_MAX];
+                    int kind = full_path(path, full, sizeof(full));
+                    bool valid = kind == P_ROOT;
+                    if (kind == P_VOL) {          /* f_stat() rejects volume roots */
+#ifdef ESP_PLATFORM
+                        FF_DIR dir;
+#else
+                        DIR dir;
+#endif
+                        sdc_lock();
+                        valid = f_opendir(&dir, full) == FR_OK;
+                        if (valid)
+                            f_closedir(&dir);
+                        sdc_unlock();
+                    } else if (kind == P_FILE) {
                         FILINFO fno;
                         sdc_lock();
                         FRESULT r = f_stat(full, &fno);
@@ -567,11 +622,13 @@ static void session(ftps_t *fs)
             } else if (!strcmp(line, "SIZE")) {
                 if (resolve(fs, arg, path, sizeof(path))) {
                     char full[FPATH_MAX];
-                    full_path(path, full, sizeof(full));
                     FILINFO fno;
-                    sdc_lock();
-                    FRESULT r = f_stat(full, &fno);
-                    sdc_unlock();
+                    FRESULT r = FR_INVALID_NAME;
+                    if (full_path(path, full, sizeof(full)) == P_FILE) {
+                        sdc_lock();
+                        r = f_stat(full, &fno);
+                        sdc_unlock();
+                    }
                     if (r == FR_OK && !(fno.fattrib & AM_DIR)) {
                         replyf(fs, "213 %lu", (unsigned long)fno.fsize);
                         continue;
@@ -591,10 +648,10 @@ static void session(ftps_t *fs)
             } else if (!strcmp(line, "DELE")) {
                 if (resolve(fs, arg, path, sizeof(path))) {
                     char full[FPATH_MAX];
-                    full_path(path, full, sizeof(full));
+                    bool valid = full_path(path, full, sizeof(full)) == P_FILE;
                     sdc_lock();
-                    bool mounted = disk_path_mounted(path);
-                    FRESULT r = mounted ? FR_DENIED : f_unlink(full);
+                    bool mounted = valid && disk_path_mounted(full);
+                    FRESULT r = (!valid || mounted) ? FR_DENIED : f_unlink(full);
                     sdc_unlock();
                     if (!mounted && r == FR_OK) {
                         reply(fs, "250 Deleted.");
@@ -605,10 +662,12 @@ static void session(ftps_t *fs)
             } else if (!strcmp(line, "MKD") || !strcmp(line, "XMKD")) {
                 if (resolve(fs, arg, path, sizeof(path))) {
                     char full[FPATH_MAX];
-                    full_path(path, full, sizeof(full));
-                    sdc_lock();
-                    FRESULT r = f_mkdir(full);
-                    sdc_unlock();
+                    FRESULT r = FR_DENIED;
+                    if (full_path(path, full, sizeof(full)) == P_FILE) {
+                        sdc_lock();
+                        r = f_mkdir(full);
+                        sdc_unlock();
+                    }
                     if (r == FR_OK) {
                         replyf(fs, "257 \"/%s\" created.", path);
                         continue;
@@ -618,10 +677,12 @@ static void session(ftps_t *fs)
             } else if (!strcmp(line, "RMD") || !strcmp(line, "XRMD")) {
                 if (resolve(fs, arg, path, sizeof(path))) {
                     char full[FPATH_MAX];
-                    full_path(path, full, sizeof(full));
-                    sdc_lock();
-                    FRESULT r = f_unlink(full);   /* removes empty dirs too */
-                    sdc_unlock();
+                    FRESULT r = FR_DENIED;
+                    if (full_path(path, full, sizeof(full)) == P_FILE) {
+                        sdc_lock();
+                        r = f_unlink(full);       /* removes empty dirs too */
+                        sdc_unlock();
+                    }
                     if (r == FR_OK) {
                         reply(fs, "250 Removed.");
                         continue;
@@ -645,13 +706,14 @@ static void session(ftps_t *fs)
             } else if (!strcmp(line, "RNTO")) {
                 if (fs->rnfr[0] && resolve(fs, arg, path, sizeof(path))) {
                     char full_from[FPATH_MAX], full_to[FPATH_MAX];
-                    full_path(fs->rnfr, full_from, sizeof(full_from));
-                    full_path(path, full_to, sizeof(full_to));
+                    bool valid = full_path(fs->rnfr, full_from, sizeof(full_from)) == P_FILE &&
+                                 full_path(path, full_to, sizeof(full_to)) == P_FILE;
                     sdc_lock();
-                    bool mounted = disk_path_mounted(fs->rnfr) || disk_path_mounted(path);
-                    FRESULT r = mounted ? FR_DENIED : f_rename(full_from, full_to);
+                    bool mounted = valid &&
+                        (disk_path_mounted(full_from) || disk_path_mounted(full_to));
+                    FRESULT r = (!valid || mounted) ? FR_DENIED : f_rename(full_from, full_to);
                     sdc_unlock();
-                    if (!mounted && r == FR_OK) {
+                    if (valid && !mounted && r == FR_OK) {
                         reply(fs, "250 Renamed.");
                         fs->rnfr[0] = 0;
                         continue;
