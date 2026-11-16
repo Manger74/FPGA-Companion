@@ -40,6 +40,24 @@
 
 #define DEFAULT_LED_MODE  1   // 0=blink, 1=on, 2=off
 
+// the LED blinks fast while a core is loaded from USB, see mcu_hw_upload_core()
+#define LED_PERIOD_MS         200
+#define LED_UPLOAD_PERIOD_MS   40
+static volatile bool led_upload = false;
+static TimerHandle_t led_timers[2];   // ws2812 or gpio led, plus pico-w led
+static int led_timer_count = 0;
+
+static __attribute__((unused)) int led_mode(void) {
+  return led_upload ? 0 : inifile_config_get_int("system", "led", DEFAULT_LED_MODE);
+}
+
+static __attribute__((unused)) void led_timer_start(const char *name, TimerCallbackFunction_t cb) {
+  TimerHandle_t h = xTimerCreate(name, pdMS_TO_TICKS(LED_PERIOD_MS), pdTRUE, NULL, cb);
+  if(!h) return;
+  if(led_timer_count < 2) led_timers[led_timer_count++] = h;
+  xTimerStart(h, 0);
+}
+
 // This is a custom SDL USB controller map entry for the
 // Data Frog PC07 pair of wireless SNES-like controllers.
 // This fixes the shoulder buttons.
@@ -1354,7 +1372,7 @@ static async_when_pending_worker_t led_worker_w = { .do_work = led_write_w };
 
 static void led_timer_w(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     led_state_w = state & 1;   // blink
     break;
@@ -1419,10 +1437,7 @@ static void mcu_hw_wifi_init(void) {
 
   // the LED timer hands its writes to the cyw43 context, see led_timer_w()
   async_context_add_when_pending_worker(cyw43_arch_async_context(), &led_worker_w);
-  TimerHandle_t led_timer_handle =
-    xTimerCreate("LED timer (W)", pdMS_TO_TICKS(200), pdTRUE,
-		 NULL, led_timer_w);
-  xTimerStart(led_timer_handle, 0);
+  led_timer_start("LED timer (W)", led_timer_w);
 
   netif_set_status_callback(netif_default, netif_status_callback);
 
@@ -1846,7 +1861,7 @@ bool mcu_hw_tcp_data(unsigned char byte) {
 #endif
 
 static void led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     gpio_xor_mask( 1u << PICO_DEFAULT_LED_PIN );
     break;
@@ -1895,7 +1910,7 @@ static void wifi_task(__attribute__((unused)) void *parms) {
 
 static void ws_led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     pio_sm_put_blocking(pio0, 0, state?WS2812_COLOR:0);
     break;
@@ -2581,9 +2596,7 @@ void mcu_hw_init(void) {
   uint offset = pio_add_program(pio0, &ws2812_program);  
   ws2812_program_init(pio0, 0, offset, WS2812_PIN, 800000, 0);
 
-  TimerHandle_t led_timer_handle =
-    xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, ws_led_timer);
-  xTimerStart(led_timer_handle, 0);
+  led_timer_start("LED timer", ws_led_timer);
 #endif
 
 #if !defined(WS2812_PIN) || defined(ENABLE_WIFI)
@@ -2615,9 +2628,7 @@ void mcu_hw_init(void) {
       // the LED pin has already been setup to detect a PICO-W
       gpio_put(PICO_DEFAULT_LED_PIN, !PICO_DEFAULT_LED_PIN_INVERTED);
       
-      TimerHandle_t led_timer_handle =
-	xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, led_timer);
-      xTimerStart(led_timer_handle, 0);
+      led_timer_start("LED timer", led_timer);
 #endif
 
       // start a init thread
@@ -2644,6 +2655,14 @@ extern TaskHandle_t menu_handle;
 void mcu_hw_upload_core(char *name) {
   debugf("Request to upload core %s", name);  
 #ifdef ENABLE_JTAG
+
+  // blink wildly while loading from USB. No need to restore, the
+  // companion resets after the upload
+  if(strncasecmp(name, "/usb", 4) == 0) {
+    led_upload = true;
+    for(int i=0;i<led_timer_count;i++)
+      xTimerChangePeriod(led_timers[i], pdMS_TO_TICKS(LED_UPLOAD_PERIOD_MS), 0);
+  }
 
   // if the core is to be loaded from sd card, then the hw may need
   // to hand card access over from FPGA to the MCU

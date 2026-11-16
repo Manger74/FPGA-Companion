@@ -3126,6 +3126,18 @@ __attribute__((weak)) uint32_t get_fattime(void)
   SHELL_CMD_EXPORT_ALIAS(lsusb, lsusb, ls usb);
 #endif
 
+#if defined(ENABLE_JTAG) && defined(M0S_DOCK)
+// both on-board leds blink alternately while a core is loaded from USB
+static volatile bool led_upload = false;
+
+static void led_upload_timer(__attribute__((unused)) TimerHandle_t t) {
+  static bool state = false;
+  state = led_upload && !state;
+  set_led(GPIO_PIN_27, state);
+  set_led(GPIO_PIN_28, led_upload && !state);
+}
+#endif
+
 void mcu_hw_upload_core(char *name) {
   debugf("Request to upload core %s", name);
 #ifdef ENABLE_JTAG
@@ -3153,6 +3165,11 @@ void mcu_hw_upload_core(char *name) {
       // the work area must outlive this call: /usb stays mounted afterwards
       // so the OSD file selector and the FTP server can keep using it
       static FATFS usb_fs;
+#ifdef M0S_DOCK
+      led_upload = true;
+      TimerHandle_t led = xTimerCreate("LED upload", pdMS_TO_TICKS(40), pdTRUE, NULL, led_upload_timer);
+      if(led) xTimerStart(led, 0);
+#endif
       f_mount(NULL, "/usb", 1);
       start = bflb_mtimer_get_time_ms();
       while ((res = f_mount(&usb_fs, "/usb", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 1000)
@@ -3163,6 +3180,13 @@ void mcu_hw_upload_core(char *name) {
           debugf("USB drive mounted");
 	  gowin_upload_core(name);
         }
+#ifdef M0S_DOCK
+      // a callback still pending switches the leds off as well
+      led_upload = false;
+      if(led) xTimerDelete(led, portMAX_DELAY);
+      set_led(GPIO_PIN_27, 0);
+      set_led(GPIO_PIN_28, 0);
+#endif
   }
 #else
   fatal_debugf("JTAG not enabled!");
