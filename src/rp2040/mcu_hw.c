@@ -1357,6 +1357,7 @@ bool mcu_hw_wifi_connect(__attribute__((unused)) char *ssid, __attribute__((unus
 #else  
 static bool is_pico_w = false;
 #include "pico/cyw43_arch.h"
+#include "pico/async_context_freertos.h"
 
 // The LED hangs on the cyw43 chip, and writing it needs the cyw43 lock, which
 // other work can hold for a while. So the timer only sets the state, and the
@@ -2662,6 +2663,16 @@ void mcu_hw_upload_core(char *name) {
     led_upload = true;
     for(int i=0;i<led_timer_count;i++)
       xTimerChangePeriod(led_timers[i], pdMS_TO_TICKS(LED_UPLOAD_PERIOD_MS), 0);
+
+#ifdef ENABLE_WIFI
+    // the pico-w led is written by the cyw43 context task (priority 4). The
+    // upload below keeps the calling task (configMAX_PRIORITIES-3) busy
+    // without blocking, so lift the cyw43 task above it. It blocks between
+    // work items and thus only takes the cpu for the short led writes.
+    if(is_pico_w)
+      vTaskPrioritySet(((async_context_freertos_t *)cyw43_arch_async_context())->task_handle,
+                       configMAX_PRIORITIES - 2);
+#endif
   }
 
   // if the core is to be loaded from sd card, then the hw may need
