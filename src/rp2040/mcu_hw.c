@@ -722,6 +722,17 @@ unsigned char mcu_hw_spi_tx_u08(unsigned char b) {
   return retval;
 }
 
+// A block of bytes without a gap between them. Only for data the core does not answer:
+// the reply to a byte is not ready in time for the next one without a gap (mcu_spi.v).
+void mcu_hw_spi_write(const unsigned char *data, int len) {
+  spi_write_blocking(SPI_BUS, data, len);
+  busy_wait_us_32(1);   // the core needs a moment for the last byte before chip select is released
+}
+
+unsigned long mcu_hw_micros(void) {
+  return time_us_32();
+}
+
 /* ======================================================================= */
 /* ======                   custom usb host drivers              ========= */
 /* ======================================================================= */
@@ -751,6 +762,12 @@ usbh_class_driver_t const* usbh_app_driver_get_cb(uint8_t* driver_count){
 
 static uint8_t network_status = NETWORK_STATUS_UNINITIALIZED;
 static bool asix_unmount_in_progress = false;
+
+#ifdef ENABLE_PPP_SERVER
+bool mcu_hw_tcpip_ready(void) {
+  return (network_status & NETWORK_STATUS_TCPIP_INIT) != 0;
+}
+#endif
 
 /* ======================================================================= */
 /* ======                   ASIX ethernet                        ========= */
@@ -1385,7 +1402,14 @@ static void mcu_hw_wifi_init(void) {
   cyw43_arch_enable_sta_mode();
   debugf("STA mode enabled");
 
-  cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  // [WIFI] POWERSAVE=0: the radio never sleeps. With the default power save mode frames
+  // to us wait until the radio wakes up again, which adds tens of ms to a round trip
+  if(inifile_config_get_int("wifi", "powersave", 1)) {
+    cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  } else {
+    cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
+    debugf("WiFi: power save off");
+  }
 
   // After a reset the access point may still hold the old association. Some (seen on a
   // Qualcomm based one) then drop the first authentication while they clear it. Phones send

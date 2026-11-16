@@ -56,6 +56,22 @@
 #define SPI_SDC_IMAGE_SELECT  1
 #define SPI_SDC_IMAGE_WRITE   2
 
+#define SPI_TARGET_NET    5   // network, plip (parallel port) frames
+#define SPI_NET_STATUS    0
+#define SPI_NET_READ      1
+#define SPI_NET_RELEASE   2
+#define SPI_NET_WRITE     3
+#define SPI_NET_COMMIT    4
+#define SPI_NET_CONFIG    5
+#define SPI_NET_STATS     6
+
+#define SPI_TARGET_A314   6   // A314 clockport interface: shared memory + interrupt bits (a314_cp.v)
+#define SPI_A314_STATUS   0
+#define SPI_A314_READ     1
+#define SPI_A314_WRITE    2
+#define SPI_A314_IRQ      3
+#define SPI_A314_ID       4
+
 #define SPI_TARGET_AUDIO  4   // audio (e.g. to play fake floppy sounds)
 #define SPI_AUDIO_ENABLE  1
 #define SPI_AUDIO_BUFFER  2   // return audio buffer usage
