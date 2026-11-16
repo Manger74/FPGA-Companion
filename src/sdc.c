@@ -309,22 +309,23 @@ DSTATUS sdc_disk_initialize(BYTE pdrv) { sdc_debugf("sdc_initialize(%d)", pdrv);
 // FatFS variant in bouffalo SDK defines DEV_SD
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
   sdc_debugf("disk_ioctl(%d, %d)", pdrv, cmd);  
+  if(pdrv == 1)   // USB: writes complete synchronously, nothing else is used
+    return (cmd == CTRL_SYNC) ? RES_OK : RES_PARERR;
   return sdc_ioctl(cmd, buff);
 }
 
 DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count) {
   // sdc_debugf("disk_read(%d, %lu)", pdrv, sector);  
 
-  if(pdrv == 1) {
-    mcu_hw_usb_sector_read(buff, sector, count);
-    return RES_OK;
-  }
+  if(pdrv == 1)
+    return mcu_hw_usb_sector_read(buff, sector, count) ? RES_ERROR : RES_OK;
     
   return sdc_read(buff, sector, count);
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count) {
-  if(pdrv == 1) return RES_WRPRT;  
+  if(pdrv == 1)
+    return mcu_hw_usb_sector_write(buff, sector, count) ? RES_ERROR : RES_OK;
   return sdc_write(buff, sector, count);
 }
 

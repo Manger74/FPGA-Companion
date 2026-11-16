@@ -1913,27 +1913,62 @@ static void ws_led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
 // keep track of one single device only, by now
 static int msc_dev_addr = -1;
 static volatile bool msc_busy = 0;
+static volatile bool msc_ok = 0;
+
+#define MSC_TIMEOUT_MS 3000
 
 static bool disk_io_complete(uint8_t dev_addr, tuh_msc_complete_data_t const * cb_data) {
-  // usb_debugf("disk_io_complete(%d)", dev_addr);
-  (void) dev_addr; (void) cb_data;
+  (void) dev_addr;
+  msc_ok = cb_data->csw->status == MSC_CSW_STATUS_PASSED;
   msc_busy = 0;
   return true;
 }
 
-// This should never be called from the USB task itself
-void mcu_hw_usb_sector_read(void *buffer, int sector, int count) {
-  usb_debugf("mcu_hw_usb_sector_read(%d, %p, %d, %d)", msc_dev_addr, buffer, sector, count);
-  if(msc_dev_addr < 0 || msc_busy) return;
-  
-  msc_busy = 1;
-  tuh_msc_read10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0);
-
-  // wait for transfer to be done. If the pio task is not running, then
-  // actively call the usb host task handler
-  while(msc_busy)
+// wait for a submitted transfer. If the pio task is not running, then
+// actively call the usb host task handler. TinyUSB does not invoke the
+// completion callback if the transfer fails early, so a timeout and the
+// unmount callback end the wait as well. After a timeout msc_busy stays
+// set, so no new transfer is started until the old one is resolved.
+static int msc_wait(const char *op, int sector) {
+  TickType_t start = xTaskGetTickCount();
+  while(msc_busy && msc_dev_addr >= 0) {
     if(!pio_usb_task_handle)
       tuh_task();
+    if(xTaskGetTickCount() - start > pdMS_TO_TICKS(MSC_TIMEOUT_MS)) {
+      usb_debugf("MSC %s timeout on sector %d", op, sector);
+      return -1;
+    }
+  }
+  if(msc_busy || !msc_ok) {
+    usb_debugf("MSC %s failed on sector %d", op, sector);
+    return -1;
+  }
+  return 0;
+}
+
+// These should never be called from the USB task itself
+int mcu_hw_usb_sector_read(void *buffer, int sector, int count) {
+  if(msc_dev_addr < 0 || msc_busy) return -1;
+
+  msc_ok = 0;
+  msc_busy = 1;
+  if(!tuh_msc_read10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0)) {
+    msc_busy = 0;
+    return -1;
+  }
+  return msc_wait("read", sector);
+}
+
+int mcu_hw_usb_sector_write(const void *buffer, int sector, int count) {
+  if(msc_dev_addr < 0 || msc_busy) return -1;
+
+  msc_ok = 0;
+  msc_busy = 1;
+  if(!tuh_msc_write10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0)) {
+    msc_busy = 0;
+    return -1;
+  }
+  return msc_wait("write", sector);
 }
 
 bool mcu_hw_usb_msc_present(void) {
@@ -1970,6 +2005,7 @@ void tuh_msc_umount_cb(uint8_t dev_addr) {
   // mark device as unused
   if(msc_dev_addr == dev_addr) {
     msc_dev_addr = -1;   
+    msc_busy = 0;          // a pending transfer will never complete
     menu_notify(MENU_EVENT_USB_UMOUNTED);
   }
 }

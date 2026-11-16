@@ -3130,11 +3130,11 @@ void mcu_hw_upload_core(char *name) {
   debugf("Request to upload core %s", name);
 #ifdef ENABLE_JTAG
   uint64_t start;
-  FATFS fs;
   FRESULT res = FR_NOT_READY;
 
   if (strstr(name, "/sd/") != NULL) {
 #if defined(TANG_CONSOLE60K) || defined(TANG_MEGA60K)
+    FATFS fs;
     f_mount(NULL, "/sd", 1);
     sdc_direct_init();
     start = bflb_mtimer_get_time_ms();
@@ -3150,16 +3150,18 @@ void mcu_hw_upload_core(char *name) {
     sdc_direct_release();
 #endif
   } else {
+      // the work area must outlive this call: /usb stays mounted afterwards
+      // so the OSD file selector and the FTP server can keep using it
+      static FATFS usb_fs;
       f_mount(NULL, "/usb", 1);
       start = bflb_mtimer_get_time_ms();
-      while ((res = f_mount(&fs, "/usb", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 1000)
+      while ((res = f_mount(&usb_fs, "/usb", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 1000)
         bflb_mtimer_delay_ms(100);
       if (res != FR_OK) {
           debugf("failed to mount USB drive");
       } else {
           debugf("USB drive mounted");
 	  gowin_upload_core(name);
-          f_mount(NULL, "/usb", 1);
         }
   }
 #else
