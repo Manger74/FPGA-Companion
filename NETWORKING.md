@@ -21,6 +21,8 @@ Currently the following use cases are implemented:
   - FTP allows to access the Companion from a PC via FTP to up- and
     download files from and to the SD card inside the device
   - Telnet allows to read log and debug info from the companion
+  - Network card bridge for the NanoMig core (nanoport, SANA-II driver
+    nanoport.device), see below
 
 ## Setup
 
@@ -80,3 +82,17 @@ would be accessed using the following command:
 atd darkforce-bbs.dyndns.org:1040  
 atd bbs.retro32.com:1337
 ```
+
+## NanoMig network card (nanoport)
+
+Pico builds (RP2040/RP2350) bridge the nanoport network card of the
+NanoMig core (SPI target 5, `src/nanoport.c`) into the active network
+interface, WiFi or USB ethernet. Nothing needs to be configured on the
+Companion: the bridge starts as soon as a core with the card is
+detected and the network is up. The Amiga uses a virtual MAC address
+(the Companion's MAC with the locally administered bit set) and gets its
+own IP address in the local network, static or via DHCP. Only IPv4 and
+ARP are bridged.
+
+Details and the Amiga setup are described in `doc/NANOPORT.md` of the
+NanoMig core.

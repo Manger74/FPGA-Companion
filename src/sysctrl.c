@@ -18,6 +18,9 @@
 #include "config.h"
 #include "mcu_hw.h"
 #include "at_wifi.h"
+#ifdef ENABLE_NANOPORT
+#include "nanoport.h"
+#endif
 
 // we are using "puff" to decompress a gzip'd FPGA config as this is a slow, yet
 // very small and memory efficient implementation of the deflate de-compression
@@ -340,6 +343,11 @@ void sys_handle_interrupts(unsigned char pending, bool ignore_coldboot) {
   
   if(pending & 0x08) // irq 3 = SDC
     sdc_handle_event();
+
+#ifdef ENABLE_NANOPORT
+  if(pending & 0x20) // irq 5 = nanoport network card
+    nanoport_handle_event();
+#endif
   
   //  if(pending & 0x10) // irq 4 = AUDIO
   //    audio_handle_event();

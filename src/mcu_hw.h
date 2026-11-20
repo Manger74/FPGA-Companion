@@ -20,6 +20,9 @@ void mcu_hw_reset(void);
 // HW SPI interface
 void mcu_hw_spi_begin(void);
 unsigned char mcu_hw_spi_tx_u08(unsigned char b);
+// bulk transfers, bytes are clocked back to back (rp2040 only)
+void mcu_hw_spi_tx_buffer(const unsigned char *buf, int len);
+void mcu_hw_spi_rx_buffer(unsigned char *buf, int len);
 void mcu_hw_spi_end(void);
 
 bool mcu_hw_hid_present(void);

@@ -15,6 +15,9 @@
 #include "../telnetd.h"
 #include "../xml.h"
 #include "../at_wifi.h"
+#ifdef ENABLE_NANOPORT
+#include "../nanoport.h"
+#endif
 
 /*-----------------------------------------------------------*/
 /*---            main FPGA communication task            ----*/
@@ -98,6 +101,11 @@ static void com_task(__attribute__((unused)) void *p ) {
     
     // finally prepare for wifi communication
     at_wifi_init();
+
+#ifdef ENABLE_NANOPORT
+    // bridge for the network card of the NanoMig core (if present)
+    nanoport_init();
+#endif
 
     debugf("Entering main loop");
   

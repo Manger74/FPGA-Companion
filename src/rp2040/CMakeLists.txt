@@ -92,6 +92,7 @@ add_executable(${PROJECT}
 	../ps2helper.c
 	../ftpd.c
 	../telnetd.c
+	../nanoport.c
 	../hidkeys.c
 )
 
@@ -161,6 +162,9 @@ elseif(${BOARD} STREQUAL MSP2_20K)
 else()
    message(FATAL_ERROR "BOARD must be PICO, PICO2, WS2040ZERO, SH20KLITE, DEV20K, MSP20K, MSP2_20K or DEV25K")
 endif()
+
+# network card of the NanoMig core (SPI target 5), see ../nanoport.c
+target_compile_definitions(${PROJECT} PRIVATE ENABLE_NANOPORT)
 
 target_include_directories(${PROJECT} PRIVATE
       ${CMAKE_CURRENT_LIST_DIR}

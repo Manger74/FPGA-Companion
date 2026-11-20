@@ -57,6 +57,13 @@
 #define SPI_SDC_IMAGE_WRITE   2
 
 #define SPI_TARGET_AUDIO  4   // audio (e.g. to play fake floppy sounds)
+
+#define SPI_TARGET_NET    5   // network card (NanoMig nanoport)
+#define SPI_NET_STATUS    0
+#define SPI_NET_RX_PUT    1
+#define SPI_NET_TX_GET    2
+#define SPI_NET_TX_DONE   3
+#define SPI_NET_INFO      4
 #define SPI_AUDIO_ENABLE  1
 #define SPI_AUDIO_BUFFER  2   // return audio buffer usage
 #define SPI_AUDIO_WRITE   3

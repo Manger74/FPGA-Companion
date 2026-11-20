@@ -722,6 +722,14 @@ unsigned char mcu_hw_spi_tx_u08(unsigned char b) {
   return retval;
 }
 
+void mcu_hw_spi_tx_buffer(const unsigned char *buf, int len) {
+  spi_write_blocking(SPI_BUS, buf, len);     // received bytes are discarded
+}
+
+void mcu_hw_spi_rx_buffer(unsigned char *buf, int len) {
+  spi_read_blocking(SPI_BUS, 0x00, buf, len);
+}
+
 /* ======================================================================= */
 /* ======                   custom usb host drivers              ========= */
 /* ======================================================================= */
