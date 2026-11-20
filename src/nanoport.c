@@ -361,7 +361,6 @@ static void np_task(__attribute__((unused)) void *parms) {
 	int len = np_tx_get(np_txbuf);
 	if(len && np_online) np_send(np_txbuf, len);
 	busy = true;
-	taskYIELD();     // let the network stack run between the frames
       }
 
       int rx_free = st[1] & 0x0f;
@@ -374,7 +373,6 @@ static void np_task(__attribute__((unused)) void *parms) {
 	}
 	np_rxq_rd++;
 	busy = true;
-	taskYIELD();
       }
 
       if(busy && !np_status(st)) break;
@@ -395,8 +393,11 @@ void nanoport_init(void) {
     if(np_txbuf) vPortFree(np_txbuf);
     return;
   }
-  // same priority as the lwIP and cyw43 tasks: a stream of frames must not
-  // starve the network stack. The stack is large enough for frames looped
-  // back into lwIP, which are processed in this task.
-  xTaskCreate(np_task, "nanoport", 2048, NULL, TCPIP_THREAD_PRIO, &np_task_handle);
+  // Just above the lwIP and cyw43 tasks: a frame is moved as soon as the core
+  // signals it (same priority meant waiting for the next tick). The network
+  // stack isn't starved, the task sleeps once both rings are empty and the
+  // RX side only gets work while the cyw43/USB tasks run. Earlier versions
+  // ran at configMAX_PRIORITIES-4, far above everything network related.
+  // The stack is large enough for frames looped back into lwIP.
+  xTaskCreate(np_task, "nanoport", 2048, NULL, TCPIP_THREAD_PRIO + 1, &np_task_handle);
 }
