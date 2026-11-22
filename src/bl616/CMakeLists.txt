@@ -50,6 +50,7 @@ target_sources(app PRIVATE
    	../hidkeys.c
    	../menu.c
    	../sdc.c
+   	../coresel.c
    	../osd_u8g2.c
    	../sysctrl.c
    	../config.c

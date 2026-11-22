@@ -6,6 +6,7 @@ idf_component_register(SRCS
 	"../../hidparser.c"
 	"../../sysctrl.c"
 	"../../sdc.c"
+	"../../coresel.c"
 	"../../menu.c"
 	"../../osd_u8g2.c"
 	"../../inifile.c"

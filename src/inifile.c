@@ -432,6 +432,7 @@ static const struct {
 
   // System
   { "SYSTEM", "LED", CONFIG_TYPE_CHOICE, "blink,on,off" },
+  { "SYSTEM", "AUTOBOOT", CONFIG_TYPE_CHOICE, "off,on" },  // core selector
   
   { NULL, NULL, 0, NULL }
 };

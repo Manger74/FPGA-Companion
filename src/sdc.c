@@ -36,6 +36,7 @@
 #include "debug.h"
 #include "config.h"
 #include "mcu_hw.h"
+#include "coresel.h"
 
 static SemaphoreHandle_t sdc_sem;
 
@@ -987,8 +988,11 @@ int sdc_image_open(int drive, char *name) {
     else        sdc_debugf("IMG %d: Delaying additional rom download", image);
     
     sdc_unlock();
-  } else
+  } else {
+    // a core loaded this way is unknown to the core selector
+    coresel_forget();
     mcu_hw_upload_core(fname);
+  }
     
   return 0;
 }

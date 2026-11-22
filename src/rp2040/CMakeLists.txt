@@ -76,6 +76,7 @@ add_executable(${PROJECT}
 	../hidparser.c
 	../hid.c
 	../sdc.c
+	../coresel.c
 	../osd_u8g2.c
 	../menu.c
 	../inifile.c

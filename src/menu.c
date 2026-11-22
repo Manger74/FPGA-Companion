@@ -32,6 +32,7 @@
 #include "sysctrl.h"
 #include "debug.h"
 #include "mcu_hw.h"
+#include "coresel.h"
 
 #ifdef ENABLE_BLUETOOTH
 #include "bluetooth.h"
@@ -105,6 +106,9 @@ typedef struct {
 
   // set if this is the list of a <cfgselector> and not a file selector
   const config_cfgsel_t *cfgsel;
+
+  // set if this is the list of the core selector
+  bool coresel;
 } fsel_state_t;
 
 // menu state is a stack since as the menu is hierarchical
@@ -879,6 +883,7 @@ void menu_goto(const config_menu_t *menu) {
 static void menu_file_selector_open(config_menu_entry_t *entry) {
   menu_debugf("menu_file_selector_open()");
   fsel_state.cfgsel = NULL;
+  fsel_state.coresel = false;
 
   // the file selector can either be opened from disk image file
   // selectors or from rom image selectors  
@@ -993,6 +998,7 @@ static void menu_cfgsel_list(const config_cfgsel_t *sel, const char *focus) {
   fsel_state.none_str = NEW_CFG_FILE;
   fsel_state.none_icn = (unsigned char*)plus_icon;
   fsel_state.cfgsel = sel;
+  fsel_state.coresel = false;
 
   menu_push();
   menu_state->label = sel->label?sel->label:"Config";
@@ -1488,7 +1494,14 @@ static void menu_fileselector_select(sdc_dir_entry_t *entry) {
     menu_cfgsel_selected(entry);
     return;
   }
-    
+
+  // the list of the core selector. Loading a core only returns on errors
+  if(fsel_state.coresel) {
+    const char *err = coresel_load(entry->name);
+    if(err) menu_draw_dialog("Select Core", err);
+    return;
+  }
+
   if(entry->is_dir) {
     if(entry->name[0] == '/') {
       // User selected the "No Disk" entry
@@ -1940,6 +1953,9 @@ static void menu_task(__attribute__((unused)) void *parms) {
       else {
 	menu_debugf("/usb mounted");
 	menu_draw_dialog("USB", "A USB mass storage device has been detected!");
+
+	// load the core selected last if another one is running
+	coresel_autoboot();
       }
     } else if(cmd == MENU_EVENT_USB_UMOUNTED) {
       if (f_unmount("/usb") != FR_OK )	menu_debugf("/usb unmount failed");
@@ -2228,6 +2244,53 @@ static const config_menu_entry_t system_menu_bluetooth = {
 };
 #endif
 
+#ifdef ENABLE_JTAG
+// the list of the cores in /cores on the usb stick
+static void menu_coresel_open(void) {
+  if(disk_status(1) != RES_OK) {
+    menu_draw_dialog("Select Core", "No USB mass storage device connected!");
+    return;
+  }
+
+  sdc_dir_entry_t *dir = coresel_list();
+  if(!dir) {
+    menu_draw_dialog("Select Core", "No cores found in\n/cores on USB");
+    return;
+  }
+
+  // the list is drawn by the file selector code
+  fsel_state.ext = NULL;
+  fsel_state.index = -1;
+  fsel_state.action = NULL;
+  fsel_state.none_str = NULL;
+  fsel_state.none_icn = NULL;
+  fsel_state.cfgsel = NULL;
+  fsel_state.coresel = true;
+
+  menu_push();
+  menu_state->label = "Select Core";
+  menu_state->selected = 1;
+  menu_state->scroll = 0;
+  menu_state->type = MENU_TYPE_FILESELECTOR;
+  menu_state->dir = dir;
+}
+
+static const config_action_command_t coresel_exec = {
+  .code = CONFIG_ACTION_COMMAND_EXEC,
+  .exec = menu_coresel_open
+};
+
+static const config_action_t coresel_action = {
+  .name = "coresel",
+  .commands = (config_action_command_t*)&coresel_exec
+};
+
+static const config_button_t coresel_btn = {
+  .label = "Select Core",
+  .action = (config_action_t*)&coresel_action
+};
+#endif
+
 // the usb core file selector
 static char *core_exts[] = { "fs", "bin", NULL }; 
 
@@ -2273,11 +2336,24 @@ static const config_menu_entry_t system_menu_usb_core_fsel = {
 #endif
 };
 
+#ifdef ENABLE_JTAG
+// second entry in main system menu
+static const config_menu_entry_t system_menu_coresel = {
+  .type = CONFIG_MENU_ENTRY_BUTTON,
+  .button = (config_button_t*)&coresel_btn,
+  .next = (config_menu_entry_t*)&system_menu_usb_core_fsel
+};
+#endif
+
 // first entry in main system menu
 static const config_menu_entry_t system_menu_about = {
   .type = CONFIG_MENU_ENTRY_BUTTON,
   .button = (config_button_t*)&about_btn,
+#ifdef ENABLE_JTAG
+  .next = (config_menu_entry_t*)&system_menu_coresel
+#else
   .next = (config_menu_entry_t*)&system_menu_usb_core_fsel
+#endif
 };
 
 // the main system menu

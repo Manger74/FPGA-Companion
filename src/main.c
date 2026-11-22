@@ -15,6 +15,7 @@
 #include "../telnetd.h"
 #include "../xml.h"
 #include "../at_wifi.h"
+#include "../coresel.h"
 
 /*-----------------------------------------------------------*/
 /*---            main FPGA communication task            ----*/
@@ -65,6 +66,9 @@ static void com_task(__attribute__((unused)) void *p ) {
       } else
 	debugf("No valid config found, neither on sd card nor in core");
     }
+
+    // restrict the core to its folder if it has been loaded by the core selector
+    coresel_init();
 
     // process any pending interrupt. Filter out irq 1 which is the
     // FPGA cold boot event which we ignore since we just booted outselves
