@@ -31,6 +31,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
@@ -71,13 +72,16 @@ static uint8_t np_hmac[6];                  // MAC of the Companion's interface
 static uint8_t np_vmac[6];                  // MAC of the Amiga
 static volatile uint32_t np_amiga_ip = 0;   // learned, network byte order
 
-// frames for the Amiga, single producer (network context), single consumer (nanoport task)
+// frames for the Amiga, single consumer (nanoport task). There are two
+// producers, the interface driver (input) and lwIP (linkoutput), running in
+// different tasks: np_rxq_lock serializes them.
 struct np_frame {
   uint16_t len;
   uint8_t data[NP_MAX_FRAME];
 };
 static struct np_frame *np_rxq = NULL;
 static volatile uint32_t np_rxq_wr = 0, np_rxq_rd = 0;
+static SemaphoreHandle_t np_rxq_lock = NULL;
 
 static uint8_t *np_txbuf = NULL;
 
@@ -104,8 +108,10 @@ static int np_dhcp_offset(const uint8_t *f, int len, uint16_t port) {
 /* ------------------------------------------------------------------ to the Amiga */
 
 static void np_queue(struct pbuf *p, int len, bool rewrite) {
+  xSemaphoreTake(np_rxq_lock, portMAX_DELAY);
   if(np_rxq_wr - np_rxq_rd >= NP_RXQ) {
     np_stats.rx_drop++;
+    xSemaphoreGive(np_rxq_lock);
     return;
   }
 
@@ -120,6 +126,7 @@ static void np_queue(struct pbuf *p, int len, bool rewrite) {
 
   np_rxq[np_rxq_wr & (NP_RXQ-1)].len = len;
   np_rxq_wr++;
+  xSemaphoreGive(np_rxq_lock);
 
   if(np_task_handle) xTaskNotifyGive(np_task_handle);
 }
@@ -387,10 +394,12 @@ void nanoport_handle_event(void) {
 void nanoport_init(void) {
   np_rxq = pvPortMalloc(NP_RXQ * sizeof(struct np_frame));
   np_txbuf = pvPortMalloc(NP_MAX_FRAME);
-  if(!np_rxq || !np_txbuf) {
+  np_rxq_lock = xSemaphoreCreateMutex();
+  if(!np_rxq || !np_txbuf || !np_rxq_lock) {
     np_debugf("not enough memory for the frame buffers");
     if(np_rxq) vPortFree(np_rxq);
     if(np_txbuf) vPortFree(np_txbuf);
+    if(np_rxq_lock) vSemaphoreDelete(np_rxq_lock);
     return;
   }
   // Just above the lwIP and cyw43 tasks: a frame is moved as soon as the core
