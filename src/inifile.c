@@ -54,8 +54,8 @@ static bool ini_is_selection(const char *l, size_t len, const char **val, size_t
 }
 
 static char *ini_filename(const char *name) {
-  char *filename = pvPortMalloc(strlen(CARD_MOUNTPOINT) + strlen(name) + 2);  // MP+'/'+name+'\0'
-  strcpy(filename, CARD_MOUNTPOINT);
+  char *filename = pvPortMalloc(strlen(sdc_get_root()) + strlen(name) + 2);  // root+'/'+name+'\0'
+  strcpy(filename, sdc_get_root());
   strcat(filename, "/");
   strcat(filename, name);
   return filename;
@@ -198,10 +198,7 @@ int inifile_read(char *name) {
     return -1;
   }
 
-  char *filename = pvPortMalloc(strlen(CARD_MOUNTPOINT) + strlen(name) + 2);  // MP+'/'+name+'\0'
-  strcpy(filename, CARD_MOUNTPOINT);
-  strcat(filename, "/");
-  strcat(filename, name);
+  char *filename = ini_filename(name);
   
   ini_debugf("Reading settings from '%s'", filename);
 
@@ -300,10 +297,7 @@ int inifile_write(char *name) {
     return -1;
   }
     
-  char *filename = pvPortMalloc(strlen(CARD_MOUNTPOINT) + strlen(name) + 2);  // MP+'/'+name+'\0'
-  strcpy(filename, CARD_MOUNTPOINT);
-  strcat(filename, "/");
-  strcat(filename, name);
+  char *filename = ini_filename(name);
 
   ini_debugf("Write settings to %s", filename);
   

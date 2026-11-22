@@ -431,14 +431,42 @@ static inline char *StrDup(const char *s) {
   return res;
 }
 
+// the root of the running core, NULL for CARD_MOUNTPOINT
+static char *root = NULL;
+
+const char *sdc_get_root(void) {
+  return root ? root : CARD_MOUNTPOINT;
+}
+
+bool sdc_path_ok(const char *path) {
+  for(const char *s = path; (s = strstr(s, "..")); s += 2)
+    if((s == path || s[-1] == '/') && (s[2] == '\0' || s[2] == '/'))
+      return false;
+  return true;
+}
+
+// Restrict the core to path. This is done before any ini is read, the
+// working directories of all drives and images are reset to it.
+void sdc_set_root(const char *path) {
+  sdc_debugf("Setting root to %s", path);
+  if(root) vPortFree(root);
+  root = StrDup(path);
+
+  for(int d=0;d<MAX_DRIVES+MAX_IMAGES;d++) {
+    if(cwd[d]) vPortFree(cwd[d]);
+    cwd[d] = StrDup(root);
+  }
+}
+
 void sdc_set_default(int drive, const char *name) {
   sdc_debugf("set default %d: %s", drive, name);
   if(drive >= MAX_DRIVES+MAX_IMAGES) return;
-  
-  // A valid filename will always begin with the mount point
-  if(strncasecmp(name, CARD_MOUNTPOINT, strlen(CARD_MOUNTPOINT)) == 0) {
+
+  // A valid filename will always begin with the root and must not leave it
+  size_t rlen = strlen(sdc_get_root());
+  if(strncasecmp(name, sdc_get_root(), rlen) == 0 && name[rlen] == '/' && sdc_path_ok(name)) {
     // name should consist of path and image name
-    char *p = strrchr(name+strlen(CARD_MOUNTPOINT), '/');
+    char *p = strrchr(name+rlen, '/');
     if(p && *p) {
       // not strndup(): that allocates from the libc heap while everything
       // here is released with vPortFree(), i.e. into the FreeRTOS heap. This
@@ -974,6 +1002,7 @@ static bool sdc_cwd_is_root(int drive) {
 
   if(strcmp(cwd[drive], "/") == 0) return true;
   if(strcmp(cwd[drive], "/sd") == 0) return true;
+  if(strcasecmp(cwd[drive], sdc_get_root()) == 0) return true;
   if(strcmp(cwd[drive], "/usb") == 0) return true;
 
   return false;
@@ -1171,7 +1200,7 @@ sdc_dir_entry_t *sdc_readdir_cfg(char **exts, const char *skip) {
   FILINFO fno;
 
   sdc_lock();
-  if(f_opendir(&dir, CARD_MOUNTPOINT) == FR_OK) {
+  if(f_opendir(&dir, sdc_get_root()) == FR_OK) {
     while(f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
       if((fno.fattrib & (AM_DIR|AM_SYS)) || fno.fname[0] == '.') continue;
       if(!sdc_cfg_ext_match(fno.fname, exts)) continue;
@@ -1265,7 +1294,7 @@ int sdc_mount_defaults(void) {
       if(sdc_image_open(drive, local_name) != 0) {
 	// open failed, also reset the path
 	if(cwd[drive]) vPortFree(cwd[drive]);
-	cwd[drive] = StrDup(CARD_MOUNTPOINT);
+	cwd[drive] = StrDup(sdc_get_root());
 	failed++;
       }
     }

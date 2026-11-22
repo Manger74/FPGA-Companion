@@ -30,6 +30,12 @@ bool sdc_wait_idle(void);
 sdc_dir_entry_t *sdc_readdir_cfg(char **exts, const char *skip);
 bool sdc_cfg_name_ok(const char *name, char **exts);
 bool sdc_image_upload_in_progress(void);
+
+// Root of the files the running core may access. This is CARD_MOUNTPOINT unless
+// the core selector restricted it to the folder of the core.
+const char *sdc_get_root(void);
+void sdc_set_root(const char *path);
+bool sdc_path_ok(const char *path);   // false if path contains a ".." element
 bool sdc_check_for_pending_image_uploads(void);
 
 #endif // SDC_H
