@@ -47,12 +47,13 @@
 
 #define NP_MAX_FRAME   1518   // without FCS
 #define NP_MIN_FRAME   14
-// frames buffered for the Amiga (power of two), taken from the FreeRTOS heap
+// frames buffered for the Amiga (power of two)
 #if PICO_RP2350
 #define NP_RXQ         8
 #else
 #define NP_RXQ         4      // the RP2040 is short of ram
 #endif
+#define NP_STACK       2048   // words, large enough for frames looped back into lwIP
 
 // core status flags (sub command 0, first byte)
 #define NP_ST_MAGIC    0xa0
@@ -84,6 +85,16 @@ static volatile uint32_t np_rxq_wr = 0, np_rxq_rd = 0;
 static SemaphoreHandle_t np_rxq_lock = NULL;
 
 static uint8_t *np_txbuf = NULL;
+
+#if PICO_RP2350
+// The RP2350 has plenty of ram outside the FreeRTOS heap. Keep the heap for
+// the tasks created at runtime, e.g. each FTP session needs 12k of stack.
+static struct np_frame np_rxq_mem[NP_RXQ];
+static uint8_t np_txbuf_mem[NP_MAX_FRAME];
+static StackType_t np_stack[NP_STACK];
+static StaticTask_t np_tcb;
+static StaticSemaphore_t np_lock_mem;
+#endif
 
 static struct {
   uint32_t tx, rx, rx_drop, loop;
@@ -392,6 +403,11 @@ void nanoport_handle_event(void) {
 }
 
 void nanoport_init(void) {
+#if PICO_RP2350
+  np_rxq = np_rxq_mem;
+  np_txbuf = np_txbuf_mem;
+  np_rxq_lock = xSemaphoreCreateMutexStatic(&np_lock_mem);
+#else
   np_rxq = pvPortMalloc(NP_RXQ * sizeof(struct np_frame));
   np_txbuf = pvPortMalloc(NP_MAX_FRAME);
   np_rxq_lock = xSemaphoreCreateMutex();
@@ -402,11 +418,17 @@ void nanoport_init(void) {
     if(np_rxq_lock) vSemaphoreDelete(np_rxq_lock);
     return;
   }
+#endif
   // Just above the lwIP and cyw43 tasks: a frame is moved as soon as the core
   // signals it (same priority meant waiting for the next tick). The network
   // stack isn't starved, the task sleeps once both rings are empty and the
   // RX side only gets work while the cyw43/USB tasks run. Earlier versions
   // ran at configMAX_PRIORITIES-4, far above everything network related.
-  // The stack is large enough for frames looped back into lwIP.
-  xTaskCreate(np_task, "nanoport", 2048, NULL, TCPIP_THREAD_PRIO + 1, &np_task_handle);
+#if PICO_RP2350
+  np_task_handle = xTaskCreateStatic(np_task, "nanoport", NP_STACK, NULL,
+				     TCPIP_THREAD_PRIO + 1, np_stack, &np_tcb);
+#else
+  xTaskCreate(np_task, "nanoport", NP_STACK, NULL, TCPIP_THREAD_PRIO + 1, &np_task_handle);
+#endif
+  np_debugf("FreeRTOS heap free: %u", (unsigned)xPortGetFreeHeapSize());
 }
