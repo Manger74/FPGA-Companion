@@ -41,6 +41,24 @@
 
 #define DEFAULT_LED_MODE  1   // 0=blink, 1=on, 2=off
 
+// the LED blinks fast while a core is loaded from USB, see mcu_hw_upload_core()
+#define LED_PERIOD_MS         200
+#define LED_UPLOAD_PERIOD_MS   40
+static volatile bool led_upload = false;
+static TimerHandle_t led_timers[2];   // ws2812 or gpio led, plus pico-w led
+static int led_timer_count = 0;
+
+static __attribute__((unused)) int led_mode(void) {
+  return led_upload ? 0 : inifile_config_get_int("system", "led", DEFAULT_LED_MODE);
+}
+
+static __attribute__((unused)) void led_timer_start(const char *name, TimerCallbackFunction_t cb) {
+  TimerHandle_t h = xTimerCreate(name, pdMS_TO_TICKS(LED_PERIOD_MS), pdTRUE, NULL, cb);
+  if(!h) return;
+  if(led_timer_count < 2) led_timers[led_timer_count++] = h;
+  xTimerStart(h, 0);
+}
+
 // This is a custom SDL USB controller map entry for the
 // Data Frog PC07 pair of wireless SNES-like controllers.
 // This fixes the shoulder buttons.
@@ -1342,6 +1360,7 @@ bool mcu_hw_wifi_connect(__attribute__((unused)) char *ssid, __attribute__((unus
 #else  
 static bool is_pico_w = false;
 #include "pico/cyw43_arch.h"
+#include "pico/async_context_freertos.h"
 
 // The LED hangs on the cyw43 chip, and writing it needs the cyw43 lock, which
 // other work can hold for a while. So the timer only sets the state, and the
@@ -1357,7 +1376,7 @@ static async_when_pending_worker_t led_worker_w = { .do_work = led_write_w };
 
 static void led_timer_w(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     led_state_w = state & 1;   // blink
     break;
@@ -1415,10 +1434,7 @@ static void mcu_hw_wifi_init(void) {
 
   // the LED timer hands its writes to the cyw43 context, see led_timer_w()
   async_context_add_when_pending_worker(cyw43_arch_async_context(), &led_worker_w);
-  TimerHandle_t led_timer_handle =
-    xTimerCreate("LED timer (W)", pdMS_TO_TICKS(200), pdTRUE,
-		 NULL, led_timer_w);
-  xTimerStart(led_timer_handle, 0);
+  led_timer_start("LED timer (W)", led_timer_w);
 
   netif_set_status_callback(netif_default, netif_status_callback);
 
@@ -1842,7 +1858,7 @@ bool mcu_hw_tcp_data(unsigned char byte) {
 #endif
 
 static void led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     gpio_xor_mask( 1u << PICO_DEFAULT_LED_PIN );
     break;
@@ -1891,7 +1907,7 @@ static void wifi_task(__attribute__((unused)) void *parms) {
 
 static void ws_led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
   static char state = 0;
-  switch(inifile_config_get_int("system", "led", DEFAULT_LED_MODE)) {
+  switch(led_mode()) {
   case 0:    
     pio_sm_put_blocking(pio0, 0, state?WS2812_COLOR:0);
     break;
@@ -1909,27 +1925,62 @@ static void ws_led_timer(__attribute__((unused)) TimerHandle_t pxTimer) {
 // keep track of one single device only, by now
 static int msc_dev_addr = -1;
 static volatile bool msc_busy = 0;
+static volatile bool msc_ok = 0;
+
+#define MSC_TIMEOUT_MS 3000
 
 static bool disk_io_complete(uint8_t dev_addr, tuh_msc_complete_data_t const * cb_data) {
-  // usb_debugf("disk_io_complete(%d)", dev_addr);
-  (void) dev_addr; (void) cb_data;
+  (void) dev_addr;
+  msc_ok = cb_data->csw->status == MSC_CSW_STATUS_PASSED;
   msc_busy = 0;
   return true;
 }
 
-// This should never be called from the USB task itself
-void mcu_hw_usb_sector_read(void *buffer, int sector, int count) {
-  usb_debugf("mcu_hw_usb_sector_read(%d, %p, %d, %d)", msc_dev_addr, buffer, sector, count);
-  if(msc_dev_addr < 0 || msc_busy) return;
-  
-  msc_busy = 1;
-  tuh_msc_read10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0);
-
-  // wait for transfer to be done. If the pio task is not running, then
-  // actively call the usb host task handler
-  while(msc_busy)
+// wait for a submitted transfer. If the pio task is not running, then
+// actively call the usb host task handler. TinyUSB does not invoke the
+// completion callback if the transfer fails early, so a timeout and the
+// unmount callback end the wait as well. After a timeout msc_busy stays
+// set, so no new transfer is started until the old one is resolved.
+static int msc_wait(const char *op, int sector) {
+  TickType_t start = xTaskGetTickCount();
+  while(msc_busy && msc_dev_addr >= 0) {
     if(!pio_usb_task_handle)
       tuh_task();
+    if(xTaskGetTickCount() - start > pdMS_TO_TICKS(MSC_TIMEOUT_MS)) {
+      usb_debugf("MSC %s timeout on sector %d", op, sector);
+      return -1;
+    }
+  }
+  if(msc_busy || !msc_ok) {
+    usb_debugf("MSC %s failed on sector %d", op, sector);
+    return -1;
+  }
+  return 0;
+}
+
+// These should never be called from the USB task itself
+int mcu_hw_usb_sector_read(void *buffer, int sector, int count) {
+  if(msc_dev_addr < 0 || msc_busy) return -1;
+
+  msc_ok = 0;
+  msc_busy = 1;
+  if(!tuh_msc_read10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0)) {
+    msc_busy = 0;
+    return -1;
+  }
+  return msc_wait("read", sector);
+}
+
+int mcu_hw_usb_sector_write(const void *buffer, int sector, int count) {
+  if(msc_dev_addr < 0 || msc_busy) return -1;
+
+  msc_ok = 0;
+  msc_busy = 1;
+  if(!tuh_msc_write10(msc_dev_addr, 0, buffer, sector, count, disk_io_complete, 0)) {
+    msc_busy = 0;
+    return -1;
+  }
+  return msc_wait("write", sector);
 }
 
 bool mcu_hw_usb_msc_present(void) {
@@ -1966,6 +2017,7 @@ void tuh_msc_umount_cb(uint8_t dev_addr) {
   // mark device as unused
   if(msc_dev_addr == dev_addr) {
     msc_dev_addr = -1;   
+    msc_busy = 0;          // a pending transfer will never complete
     menu_notify(MENU_EVENT_USB_UMOUNTED);
   }
 }
@@ -2541,9 +2593,7 @@ void mcu_hw_init(void) {
   uint offset = pio_add_program(pio0, &ws2812_program);  
   ws2812_program_init(pio0, 0, offset, WS2812_PIN, 800000, 0);
 
-  TimerHandle_t led_timer_handle =
-    xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, ws_led_timer);
-  xTimerStart(led_timer_handle, 0);
+  led_timer_start("LED timer", ws_led_timer);
 #endif
 
 #if !defined(WS2812_PIN) || defined(ENABLE_WIFI)
@@ -2575,9 +2625,7 @@ void mcu_hw_init(void) {
       // the LED pin has already been setup to detect a PICO-W
       gpio_put(PICO_DEFAULT_LED_PIN, !PICO_DEFAULT_LED_PIN_INVERTED);
       
-      TimerHandle_t led_timer_handle =
-	xTimerCreate("LED timer", pdMS_TO_TICKS(200), pdTRUE, NULL, led_timer);
-      xTimerStart(led_timer_handle, 0);
+      led_timer_start("LED timer", led_timer);
 #endif
 
       // start a init thread
@@ -2604,6 +2652,24 @@ extern TaskHandle_t menu_handle;
 void mcu_hw_upload_core(char *name) {
   debugf("Request to upload core %s", name);  
 #ifdef ENABLE_JTAG
+
+  // blink wildly while loading from USB. No need to restore, the
+  // companion resets after the upload
+  if(strncasecmp(name, "/usb", 4) == 0) {
+    led_upload = true;
+    for(int i=0;i<led_timer_count;i++)
+      xTimerChangePeriod(led_timers[i], pdMS_TO_TICKS(LED_UPLOAD_PERIOD_MS), 0);
+
+#ifdef ENABLE_WIFI
+    // the pico-w led is written by the cyw43 context task (priority 4). The
+    // upload below keeps the calling task (configMAX_PRIORITIES-3) busy
+    // without blocking, so lift the cyw43 task above it. It blocks between
+    // work items and thus only takes the cpu for the short led writes.
+    if(is_pico_w)
+      vTaskPrioritySet(((async_context_freertos_t *)cyw43_arch_async_context())->task_handle,
+                       configMAX_PRIORITIES - 2);
+#endif
+  }
 
   // if the core is to be loaded from sd card, then the hw may need
   // to hand card access over from FPGA to the MCU

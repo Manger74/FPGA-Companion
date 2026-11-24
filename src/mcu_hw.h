@@ -27,7 +27,9 @@ void mcu_hw_spi_rx_buffer(unsigned char *buf, int len);
 void mcu_hw_spi_end(void);
 
 bool mcu_hw_hid_present(void);
-void mcu_hw_usb_sector_read(void *buffer, int sector, int count);
+// return 0 on success, -1 on error (rp2040 only, bl616 uses the SDK FatFs driver)
+int mcu_hw_usb_sector_read(void *buffer, int sector, int count);
+int mcu_hw_usb_sector_write(const void *buffer, int sector, int count);
 void mcu_hw_upload_core(char *name);
 bool mcu_hw_usb_msc_present(void);
 
