@@ -7,6 +7,7 @@
 #include "menu.h"
 
 #include "inifile.h"
+#include "config.h"
 #include "mcu_hw.h"
 
 #include <string.h>  // for memcpy
@@ -214,6 +215,15 @@ static void kbd_tx_modmap(bool make, uint8_t mod) {
   }
 }	    
 
+// Short keyboards have no second Amiga key: on an Amiga core (NanoMig) Ctrl +
+// LGUI (left Amiga) is sent as RGUI (right Amiga), Ctrl is suppressed meanwhile.
+// Not applied if RGUI is physically pressed, so Ctrl+LAmiga+RAmiga (reset) works
+static uint8_t amiga_ctrl_map(uint8_t mod) {
+  if ((mod & 0x08) && (mod & 0x11) && !(mod & 0x80) && cfg && cfg->name && !strcasecmp(cfg->name, "NanoMig"))
+    mod = (uint8_t)((mod & ~0x19) | 0x80);
+  return mod;
+}
+
 static inline bool is_make(uint8_t a) { return !(a&0x80); }
 static inline uint8_t code(uint8_t a) { return a&0x7f; }
 
@@ -328,15 +338,17 @@ void kbd_parse(__attribute__((unused)) const hid_report_t *report, struct hid_kb
   int hotkey = inifile_config_get_int("menu", "hotkey", 0x45); // default is f12
   if(!hotkey) hotkey = 0x45;
   // check if modifier have changed
-  if((buffer[0] != state->last_report[0]) && !osd_is_visible()) {
+  uint8_t mod_old = amiga_ctrl_map(state->last_report[0]);
+  uint8_t mod_new = amiga_ctrl_map(buffer[0]);
+  if((mod_new != mod_old) && !osd_is_visible()) {
     for(int i=0;i<8;i++) {
       // modifier keys map to key codes 0x68+
       
       // modifier released?
-      if((state->last_report[0] & (1<<i)) && !(buffer[0] & (1<<i)))
+      if((mod_old & (1<<i)) && !(mod_new & (1<<i)))
         kbd_tx_remap(0x80 | (i+0x68));
       // modifier pressed?
-      if(!(state->last_report[0] & (1<<i)) && (buffer[0] & (1<<i)))
+      if(!(mod_old & (1<<i)) && (mod_new & (1<<i)))
         kbd_tx_remap(i+0x68);
     }
   }
@@ -406,8 +418,9 @@ void kbd_parse(__attribute__((unused)) const hid_report_t *report, struct hid_kb
 void kbd_release_all(struct hid_kbd_state_S *state) {
   int hotkey = inifile_config_get_int("menu", "hotkey", 0x45);
   if(!hotkey) hotkey = 0x45;
+  uint8_t mod = amiga_ctrl_map(state->last_report[0]);
   for(int i=0;i<8;i++)
-    if(state->last_report[0] & (1<<i))
+    if(mod & (1<<i))
       kbd_tx_remap(0x80 | (i+0x68));
 
   // the menu hotkey was never forwarded to the core, so it is not released
