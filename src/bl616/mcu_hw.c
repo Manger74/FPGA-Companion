@@ -80,6 +80,7 @@ extern void bl_show_chipinfo(void);
 
 #ifdef TANG_CONSOLE60K
 #warning "Building for TANG_CONSOLE60K internal BL616"
+#define BOARD_NAME "Console60k"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_JTAGSEL  GPIO_PIN_28
@@ -87,24 +88,28 @@ extern void bl_show_chipinfo(void);
 #define PIN_UART_RX  GPIO_PIN_22
 #elif TANG_NANO20K
 #warning "Building for TANG_NANO20K internal BL616"
+#define BOARD_NAME "Nano20k"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_UART_TX  GPIO_PIN_11
 #define PIN_UART_RX  GPIO_PIN_20
 #elif TANG_NANO20K_V3923
 #warning "Building for TANG_NANO20K internal BL616 v3923"
+#define BOARD_NAME "Nano20k v3923"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_UART_TX  GPIO_PIN_11
 #define PIN_UART_RX  GPIO_PIN_20
 #elif M0S_DOCK
 #warning "Building for M0S DOCK BL616"
+#define BOARD_NAME "M0S Dock"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_UART_TX  GPIO_PIN_21
 #define PIN_UART_RX  GPIO_PIN_22
 #elif TANG_MEGA138KPRO
 #warning "Building for TANG_MEGA138KPRO internal BL616"
+#define BOARD_NAME "Mega138kPro"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_JTAGSEL  GPIO_PIN_10
@@ -112,6 +117,7 @@ extern void bl_show_chipinfo(void);
 #define PIN_UART_RX  GPIO_PIN_22
 #elif TANG_MEGA60K
 #warning "Building for TANG_MEGA60K internal BL616"
+#define BOARD_NAME "Mega60k"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_JTAGSEL  GPIO_PIN_28
@@ -119,6 +125,7 @@ extern void bl_show_chipinfo(void);
 #define PIN_UART_RX  GPIO_PIN_22
 #elif TANG_PRIMER25K
 #warning "Building for TANG_PRIMER25K internal BL616"
+#define BOARD_NAME "Primer25k"
 #include "../jtag.h"
 #include "./sdc_direct.h"
 #define PIN_JTAGSEL  GPIO_PIN_11
@@ -186,6 +193,22 @@ void mcu_hw_jtag_exit_gpio_out_mode(void) {
 }
 
 static void mcu_hw_jtag_init(void);
+
+// return info/version strings
+char *mcu_get_info(int index) {
+  static const char *board_name = BOARD_NAME;
+  static const char *sdk_version = "SDK " SDK_VERSION;
+  static char gcc_version[32];
+  
+  if(index == 0)      return board_name;
+  else if(index == 1) return sdk_version;
+  else if(index == 2) {
+    sprintf(gcc_version, "GCC %d.%d.%d", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+    return gcc_version;
+  }
+
+  return NULL;
+}
 
 /* ============================================================================================= */
 /* ===============                          USB                                   ============== */
@@ -351,10 +374,6 @@ static struct usb_config {
     int nbytes;
     hid_report_t report[MAX_JS_PER_IFACE];
     uint8_t report_count;
-    struct usbh_hid_report_info cherry_report;
-    uint16_t input_report_size;
-    bool report_ids_present;
-    bool use_cherry_keyboard;
     struct usb_config *usb;
     SemaphoreHandle_t sem;
     TaskHandle_t task_handle;
@@ -461,201 +480,8 @@ static void xbox_parse(struct xbox_info_S *xbox) {
     xbox->last_state_y = ay;
     usb_debugf("XBOX Joy%d: B %02x EB %02x X %02x Y %02x", xbox->js_index, state, state_btn_extra, ax, ay);
 
-    if(osd_is_visible()) {	       
-      // if OSD is visible, then process events locally
-      menu_joystick_state(state);
-    } else {
-    mcu_hw_spi_begin();
-    mcu_hw_spi_tx_u08(SPI_TARGET_HID);
-    mcu_hw_spi_tx_u08(SPI_HID_JOYSTICK);
-    mcu_hw_spi_tx_u08(xbox->js_index);
-    mcu_hw_spi_tx_u08(state);
-    mcu_hw_spi_tx_u08(ax); // gamepad analog X
-    mcu_hw_spi_tx_u08(ay); // gamepad analog Y
-    mcu_hw_spi_tx_u08(state_btn_extra); // gamepad extra buttons
-    mcu_hw_spi_end();
-    }
+    hid_joystick_push(xbox->js_index, state, ax, ay, state_btn_extra);
   }
-}
-
-static bool usbh_hid_prepare_report_info(struct hid_info_S *hid)
-{
-  struct usbh_hid_report_info *report = &hid->cherry_report;
-  uint64_t max_report_bits = 0;
-
-  hid->report_ids_present = false;
-  hid->use_cherry_keyboard = false;
-  for (uint32_t i = 0; i < report->report_item_count; i++) {
-    struct usbh_hid_report_item *item = &report->report_items[i];
-    uint64_t bit_offset = 0;
-
-    if (item->attribute.report_id != 0)
-      hid->report_ids_present = true;
-
-    for (uint32_t j = 0; j < i; j++) {
-      const struct usbh_hid_report_item *previous = &report->report_items[j];
-      if (previous->report_type == item->report_type &&
-          previous->attribute.report_id == item->attribute.report_id) {
-        bit_offset += (uint64_t)previous->attribute.report_size *
-                      previous->attribute.report_count;
-      }
-    }
-
-    if (bit_offset > UINT32_MAX)
-      return false;
-    item->report_bit_offset = (uint32_t)bit_offset;
-
-    if (item->report_type != HID_REPORT_INPUT)
-      continue;
-
-    uint64_t item_end = bit_offset +
-                        (uint64_t)item->attribute.report_size *
-                        item->attribute.report_count;
-    if (item_end > max_report_bits)
-      max_report_bits = item_end;
-
-    if (!(item->report_flags & HID_MAINITEM_CONSTANT) &&
-        item->attribute.usage_page == 0x07)
-      hid->use_cherry_keyboard = true;
-  }
-
-  uint64_t report_size = (max_report_bits + 7) / 8;
-  if (hid->report_ids_present)
-    report_size++;
-  if (report_size == 0 || report_size > MAX_REPORT_SIZE)
-    return false;
-
-  hid->input_report_size = (uint16_t)report_size;
-  return true;
-}
-
-static bool usbh_hid_read_converted_value(
-    const struct usbh_hid_report_item *item, uint32_t scalar,
-    const uint8_t *bytes, uint32_t bytes_len, uint32_t element,
-    uint32_t *value)
-{
-  uint32_t width = item->attribute.report_size;
-  uint64_t first_bit = (uint64_t)element * width;
-
-  if (width == 0 || width > 32)
-    return false;
-
-  *value = 0;
-  for (uint32_t bit = 0; bit < width; bit++) {
-    uint64_t source_bit = first_bit + bit;
-    uint8_t set;
-
-    if (bytes) {
-      if (source_bit >= (uint64_t)bytes_len * 8)
-        return false;
-      set = (bytes[source_bit / 8] >> (source_bit % 8)) & 1;
-    } else {
-      if (source_bit >= 32)
-        return false;
-      set = (scalar >> source_bit) & 1;
-    }
-
-    *value |= (uint32_t)set << bit;
-  }
-  return true;
-}
-
-static void usbh_hid_set_keyboard_usage(uint8_t *modifiers, uint8_t *keys,
-                                        uint16_t usage)
-{
-  if (usage >= 0xe0 && usage <= 0xe7) {
-    *modifiers |= (uint8_t)(1U << (usage - 0xe0));
-  } else if (usage > 3 && usage <= UINT8_MAX) {
-    keys[usage / 8] |= (uint8_t)(1U << (usage % 8));
-  }
-}
-
-static bool usbh_hid_keyboard_report_parse(struct hid_info_S *hid,
-                                           const uint8_t *report_buf,
-                                           uint32_t report_len)
-{
-  uint8_t report_id = hid->report_ids_present ? report_buf[0] : 0;
-  uint8_t modifiers = 0;
-  uint8_t keys[32] = { 0 };
-  uint64_t required_bits = 0;
-  bool has_report = false;
-
-  for (uint32_t i = 0; i < hid->cherry_report.report_item_count; i++) {
-    const struct usbh_hid_report_item *item =
-        &hid->cherry_report.report_items[i];
-    if (item->report_type != HID_REPORT_INPUT ||
-        item->attribute.report_id != report_id)
-      continue;
-
-    has_report = true;
-    uint64_t item_end = (uint64_t)item->report_bit_offset +
-                        (uint64_t)item->attribute.report_size *
-                        item->attribute.report_count;
-    if (item_end > required_bits)
-      required_bits = item_end;
-  }
-
-  if (!has_report)
-    return false;
-
-  uint64_t required_len = (required_bits + 7) / 8;
-  if (hid->report_ids_present)
-    required_len++;
-  if (report_len < required_len)
-    return false;
-
-  bool found_keyboard_data = false;
-  for (uint32_t i = 0; i < hid->cherry_report.report_item_count; i++) {
-    const struct usbh_hid_report_item *item =
-        &hid->cherry_report.report_items[i];
-    if (item->report_type != HID_REPORT_INPUT ||
-        item->attribute.report_id != report_id ||
-        (item->report_flags & HID_MAINITEM_CONSTANT) ||
-        item->attribute.usage_page != 0x07)
-      continue;
-
-    uint32_t scalar = 0;
-    uint8_t *bytes = NULL;
-    uint32_t bytes_len = 0;
-    int ret = usbh_hid_report_convert((struct usbh_hid_report_item *)item,
-                                      report_buf, &scalar, &bytes,
-                                      &bytes_len);
-    if (ret < 0)
-      return false;
-
-    found_keyboard_data = true;
-    bool variable = (item->report_flags & HID_MAINITEM_VARIABLE) != 0;
-    for (uint32_t element = 0;
-         element < item->attribute.report_count; element++) {
-      uint32_t value;
-      if (!usbh_hid_read_converted_value(item, scalar, bytes, bytes_len,
-                                         element, &value))
-        return false;
-      if (value == 0)
-        continue;
-
-      if (variable) {
-        uint16_t usage_min = item->attribute.usage_min;
-        uint16_t usage_max = item->attribute.usage_max;
-        if (usage_min > usage_max || usage_min == UINT16_MAX)
-          continue;
-        uint32_t usage_count = (uint32_t)usage_max - usage_min + 1;
-        uint16_t usage = usage_min +
-                         (element < usage_count ? element : usage_count - 1);
-        usbh_hid_set_keyboard_usage(&modifiers, keys, usage);
-      } else {
-        if (value <= 3)
-          return false;
-        usbh_hid_set_keyboard_usage(&modifiers, keys, (uint16_t)value);
-      }
-    }
-  }
-
-  if (!found_keyboard_data)
-    return false;
-
-  kbd_parse_usage_state(&hid->hid_state[0].kbd, modifiers, keys);
-  return true;
 }
 
 // each HID client gets itws own thread which submits urbs
@@ -675,14 +501,12 @@ static void usbh_hid_client_thread(void *argument) {
   usb_debugf("report type: 0x%04x          ", hid->report[0].type);
 
   const UsbGamepadMap *map;
-  size_t len = hid->use_cherry_keyboard ? hid->input_report_size : 0;
-  if (!hid->use_cherry_keyboard) {
-    for (uint8_t i = 0; i < hid->report_count; i++) {
-      size_t report_len = hid->report[i].report_size +
-          (hid->report[i].report_id_present ? 1 : 0);
-      if (report_len > len)
-        len = report_len;
-    }
+  size_t len = 0;
+  for (uint8_t i = 0; i < hid->report_count; i++) {
+    size_t report_len = hid->report[i].report_size +
+        (hid->report[i].report_id_present ? 1 : 0);
+    if (report_len > len)
+      len = report_len;
   }
   if (len == 0 || len > sizeof(hid_buffer[0])) {
     usb_debugf("HID client #%d: input report too large (%u bytes)",
@@ -735,7 +559,7 @@ static void usbh_hid_client_thread(void *argument) {
                     hid->class->hport,
                     hid->class->intin,
                     hid->buffer, len,
-                    hid_interval_ms,
+                    0,
                     usbh_hid_callback, hid);
 
   if (hid->class->hport->device_desc.idVendor == 0x2dc8 && hid->class->hport->device_desc.idProduct == 0x3105) {
@@ -769,7 +593,7 @@ static void usbh_hid_client_thread(void *argument) {
                       hid->class->hport,
                       hid->class->intin,
                       hid->buffer, len,
-                      hid_interval_ms,
+                      0,
                       usbh_hid_callback, hid);
 
     int ret = usbh_submit_urb(&hid->class->intin_urb);
@@ -800,9 +624,7 @@ static void usbh_hid_client_thread(void *argument) {
       break;
 
     if (hid->nbytes > 0) {
-      if (hid->use_cherry_keyboard)
-        usbh_hid_keyboard_report_parse(hid, hid->buffer, hid->nbytes);
-      else if (!hid->report[0].report_id_present)
+      if (!hid->report[0].report_id_present)
         hid_parse(&hid->report[0], &hid->hid_state[0],
                   hid->buffer, hid->nbytes);
       else if (hid->nbytes > 0) {
@@ -834,7 +656,11 @@ static void usbh_hid_client_thread(void *argument) {
 
   usb_debugf("HID client #%d: stopping", hid->index);
   for (uint8_t i = 0; i < hid->report_count; i++) {
-    if (hid->hid_state[i].joystick.js_index != NO_JOYSTICK) {
+    if (hid->report[i].type == REPORT_TYPE_KEYBOARD)
+      kbd_release_all(&hid->hid_state[i].kbd);
+    // js_index shares its byte with the state of other report types
+    if (hid->report[i].type == REPORT_TYPE_JOYSTICK &&
+        hid->hid_state[i].joystick.js_index != NO_JOYSTICK) {
       hid_release_joystick(hid->hid_state[i].joystick.js_index);
       hid->hid_state[i].joystick.js_index = NO_JOYSTICK;
     }
@@ -1010,7 +836,7 @@ static void usbh_xbox_client_thread(void *argument) {
                     xbox->class->hport, 
                     xbox->class->intin, 
                     xbox->buffer, XBOX_REPORT_SIZE,
-                    hid_interval_ms,
+                    0,
                     usbh_xbox_callback, xbox);
 
     int ret = usbh_submit_urb(&xbox->class->intin_urb);
@@ -1088,7 +914,6 @@ void usbh_hid_run(struct usbh_hid *hid_class)
     struct hid_info_S *hid = &usb->hid_info[i];
     memset(hid->report, 0, sizeof(hid->report));
     memset(hid->hid_state, 0, sizeof(hid->hid_state));
-    memset(&hid->cherry_report, 0, sizeof(hid->cherry_report));
     hid->report_count = 0;
     for (uint8_t report = 0; report < MAX_JS_PER_IFACE; report++)
       hid->hid_state[report].joystick.js_index = NO_JOYSTICK;
@@ -1133,25 +958,7 @@ void usbh_hid_run(struct usbh_hid *hid_class)
         }
       }
     }
-    int cherry_parse_result = usbh_hid_parse_report_descriptor(
-    report_desc, hid_class->report_size,
-        &usb->hid_info[i].cherry_report);
-    if (cherry_parse_result == 0 &&
-        usbh_hid_prepare_report_info(&usb->hid_info[i])) {
-      if (usb->hid_info[i].use_cherry_keyboard)
-        usb->hid_info[i].report[0].type = REPORT_TYPE_KEYBOARD;
-    }
-    if (usb->hid_info[i].use_cherry_keyboard)
-      usb->hid_info[i].report_count = 1;
-  
-    if (!usb->hid_info[i].use_cherry_keyboard && !project_report_parsed) {
-      usb->hid_info[i].state = STATE_FAILED;
-      return;
-    }
-
-    if (usb->hid_info[i].report[0].type == REPORT_TYPE_KEYBOARD &&
-        !usb->hid_info[i].use_cherry_keyboard) {
-      usb_debugf("HID keyboard report descriptor is unsupported");
+    if (!project_report_parsed) {
       usb->hid_info[i].state = STATE_FAILED;
       return;
     }
@@ -1171,7 +978,9 @@ void usbh_hid_stop(struct usbh_hid *hid_class)
 
   for (uint8_t report = 0;
        report < usb_config.hid_info[i].report_count; report++) {
-    if (usb_config.hid_info[i].hid_state[report].joystick.js_index !=
+    // js_index shares its byte with the state of other report types
+    if (usb_config.hid_info[i].report[report].type == REPORT_TYPE_JOYSTICK &&
+        usb_config.hid_info[i].hid_state[report].joystick.js_index !=
         NO_JOYSTICK) {
       hid_release_joystick(
           usb_config.hid_info[i].hid_state[report].joystick.js_index);
@@ -1565,6 +1374,8 @@ static void mn_board_init(void) {
     /* system clock */
     system_clock_init();
 
+    bflb_rtc_init(NULL, BFLB_RTC_32K_CLK_RC);
+
     peripheral_clock_init();
 
     /* irq init */
@@ -1640,7 +1451,7 @@ static void mn_board_init(void) {
 
     log_start();
 
-#if (defined(CONFIG_LUA) || defined(CONFIG_BFLOG) || defined(CONFIG_FATFS))
+#if (defined(CONFIG_LUA) || defined(CONFIG_BFLB_LOG) || defined(CONFIG_FATFS))
     rtc = bflb_device_get_by_name("rtc");
 #endif
 
@@ -2998,11 +2809,16 @@ void mcu_hw_fpga_resume_spi(void) {
 }
 void mcu_hw_jtag_toggleClk(uint32_t clk_len)
 {
+  // the output register still holds the last bit of the previous bitstream, with TMS
+  // high. TMS goes low first, so the clocks stay in RUN-TEST/IDLE (an SRAM erase needs
+  // them there), and TCK comes from the board's pin.
+  uint32_t idle = *reg_gpio0_31 & ~((1u << JTAG_TMS_BIT) | (1u << JTAG_TCK_BIT));
+  *reg_gpio0_31 = idle;
   mcu_hw_jtag_enter_gpio_out_mode();
 
   for (uint32_t i = 0; i < clk_len; i++) {
-    *reg_gpio0_31 = *reg_gpio0_31 & (0xffffffff ^ (1 << 10)); // TCK=0
-    *reg_gpio0_31 = *reg_gpio0_31 | (1 << 10); // TCK=1
+    *reg_gpio0_31 = idle;                         // TCK=0
+    *reg_gpio0_31 = idle | (1u << JTAG_TCK_BIT);  // TCK=1
   }
 
   mcu_hw_jtag_exit_gpio_out_mode();
@@ -3016,17 +2832,22 @@ static bool usb_msc_mounted = false;
 
 // bouffalo sdk does not expect sd card _and_ usbh msc to be enabled at the same time
 extern void fatfs_usbh_driver_register(struct usbh_msc *msc_class);
+extern void fatfs_usbh_driver_unregister(struct usbh_msc *msc_class);
+
+#define USBH_MSC_READY_TIMEOUT_MS 5000
+#define USBH_MSC_READY_RETRY_MS   250
 
 static void usbh_msc_thread(void *arg)
 {
-  int ret;
+  int ret = -1;
   struct usbh_msc *msc_class = (struct usbh_msc *)arg;
 
-  while ((msc_class = (struct usbh_msc *)usbh_find_class_instance("/dev/sda")) == NULL) {
-      goto delete;
+  for (uint32_t start = bflb_mtimer_get_time_ms();
+       msc_class->hport->connected && bflb_mtimer_get_time_ms() - start < USBH_MSC_READY_TIMEOUT_MS;
+       vTaskDelay(pdMS_TO_TICKS(USBH_MSC_READY_RETRY_MS))) {
+    ret = usbh_msc_scsi_init(msc_class);
+    if (ret == 0) break;
   }
-
-  ret = usbh_msc_scsi_init(msc_class);
   if (ret < 0) {
       sdc_debugf("scsi_init error,ret:%d", ret);
       goto delete;
@@ -3084,6 +2905,7 @@ void vApplicationMallocFailedHook(void)
 
 void usbh_msc_stop(struct usbh_msc *msc_class)
 {
+  fatfs_usbh_driver_unregister(msc_class);
   menu_notify(MENU_EVENT_USB_UMOUNTED);
   usb_msc_mounted = false;
 }
@@ -3152,7 +2974,7 @@ void mcu_hw_upload_core(char *name) {
   } else {
       f_mount(NULL, "/usb", 1);
       start = bflb_mtimer_get_time_ms();
-      while ((res = f_mount(&fs, "/usb", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 1000)
+      while ((res = f_mount(&fs, "/usb", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < USBH_MSC_READY_TIMEOUT_MS)
         bflb_mtimer_delay_ms(100);
       if (res != FR_OK) {
           debugf("failed to mount USB drive");

@@ -60,11 +60,27 @@ target_sources(app PRIVATE
     hid_keyboard_template.c
     ../gowin.c
     sdc_direct.c
-    ../ps2helper.c
 )
+
+if(EXISTS "$ENV{BL_SDK_BASE}/VERSION")
+    file(READ "$ENV{BL_SDK_BASE}/VERSION" VERSION_FILE_CONTENT)
+    string(REGEX MATCH "PROJECT_SDK_VERSION[ ]+\"([^\"]+)\"" _ ${VERSION_FILE_CONTENT})
+    add_definitions(-DSDK_VERSION="${CMAKE_MATCH_1}")
+else()
+    add_definitions(-DSDK_VERSION="<unknown>")
+endif()
 
 file(GLOB COMPONENT_SRCS ../u8g2/csrc/*.c  ../u8g2/sys/bitmap/common/*.c)
 target_sources(app PRIVATE ${COMPONENT_SRCS})
+
+# regenerate version.h from git on every build
+add_custom_target(version_h
+    COMMAND ${CMAKE_COMMAND} -DVERSION_H=${CMAKE_CURRENT_BINARY_DIR}/version.h
+            -DSRC_DIR=${CMAKE_CURRENT_LIST_DIR}/.. -P ${CMAKE_CURRENT_LIST_DIR}/../version.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/version.h
+    COMMENT "Generating version.h")
+add_dependencies(app version_h)
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 sdk_set_main_file(../main.c)
 

@@ -14,6 +14,7 @@
 #include <strings.h>
 #include "tusb.h"
 #include "pico/multicore.h"
+#include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
 #include "../usb_controller_maps.h"
@@ -67,26 +68,34 @@ UsbGamepadMap data_frog_pc07 =
     
 #if MISTLE_BOARD == 0
 #warning "Building for Raspberry Pi Pico or Pico-W"
+#define BOARD_NAME "Pico, Pico-W"
 #elif MISTLE_BOARD == 1
 #warning "Building for Raspberry Pi Pico2 or Pico2-W"
+#define BOARD_NAME "Pico2, Pico2-W"
 #elif MISTLE_BOARD == 2
 #warning "Building for Waveshare RP2040-Zero"
+#define BOARD_NAME "WS RP2040-Zero"
 #include "../jtag.h"
 #elif MISTLE_BOARD == 3
 #warning "Building for MiSTeryShield20k-Lite"
+#define BOARD_NAME "Shield20k-Lite"
 #elif MISTLE_BOARD == 4
 #warning "Building for MiSTeryDev20k"
+#define BOARD_NAME "MiSTeryDev20k"
 #include "../jtag.h"
 #include "./sdio.h"
 #elif MISTLE_BOARD == 5
 #warning "Building for MiSTeryShieldPicoTN20k"
+#define BOARD_NAME "ShieldPico TN20k"
 #include "../jtag.h"
 #elif MISTLE_BOARD == 6
 #warning "Building for GW3A/GW5A DEV 25K"
+#define BOARD_NAME "MiSTle Dev25k"
 #include "../jtag.h"
 #include "pio_jtag.h"
 #elif MISTLE_BOARD == 7
 #warning "Building for MiSTeryShieldPico2_TN20k"
+#define BOARD_NAME "ShieldPico2 TN20k"
 #include "../jtag.h"
 #include "pio_jtag.h"
 #else
@@ -162,6 +171,22 @@ UsbGamepadMap data_frog_pc07 =
 #ifdef WS2812_PIN
 #include "ws2812.pio.h"
 #endif
+
+// return info/version strings
+char *mcu_get_info(int index) {
+  static const char *board_name = BOARD_NAME;
+  static const char *sdk_version = "Pico SDK " PICO_SDK_VERSION_STRING;
+  static char gcc_version[32];
+  
+  if(index == 0)      return board_name;
+  else if(index == 1) return sdk_version;
+  else if(index == 2) {
+    sprintf(gcc_version, "GCC %d.%d.%d", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+    return gcc_version;
+  }
+
+  return NULL;
+}
 
 /* ======================================================================== */
 /* ===============                USB                        ============== */
@@ -595,9 +620,12 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if(hid_device[idx].dev_addr == dev_addr && hid_device[idx].instance == instance) {
       usb_debugf("releasing %d", idx);
       hid_device[idx].dev_addr = 0xff;
+      for(int i=0;i<MAX_JS_PER_IFACE;i++)
+	if(hid_device[idx].rep[i].type == REPORT_TYPE_KEYBOARD)
+	  kbd_release_all(&hid_device[idx].state[i].kbd);
       if(hid_device[idx].rep[0].type == REPORT_TYPE_JOYSTICK) {
 	for(int i=0;i<MAX_JS_PER_IFACE;i++)
-	  if(hid_device[idx].state[0].joystick.js_index != NO_JOYSTICK)	
+	  if(hid_device[idx].state[i].joystick.js_index != NO_JOYSTICK)	
 	    hid_release_joystick(hid_device[idx].state[i].joystick.js_index);
       }
     }
@@ -1134,23 +1162,7 @@ void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_i
 	    xbox_state[idx].state_x = ax;
 	    xbox_state[idx].state_y = ay;
 
-	    // usb_debugf("XBOX Joy%d: B %02x EB %02x X %02x Y %02x", xbox_state[idx].js_index, state, state_btn_extra, ax, ay);
-
-	    if(osd_is_visible()) {	       
-	      // if OSD is visible, then process events locally
-	      menu_joystick_state(state);
-	    } else {
-	      // otherwise send events into core
-	      mcu_hw_spi_begin();
-	      mcu_hw_spi_tx_u08(SPI_TARGET_HID);
-	      mcu_hw_spi_tx_u08(SPI_HID_JOYSTICK);
-	      mcu_hw_spi_tx_u08(xbox_state[idx].js_index);
-	      mcu_hw_spi_tx_u08(state);
-	      mcu_hw_spi_tx_u08(ax); // gamepad analog X
-	      mcu_hw_spi_tx_u08(ay); // gamepad analog Y
-	      mcu_hw_spi_tx_u08(state_btn_extra); // gamepad extra buttons
-	      mcu_hw_spi_end();
-	    }
+	    hid_joystick_push(xbox_state[idx].js_index, state, ax, ay, state_btn_extra);
 	  }
 	}
       }
