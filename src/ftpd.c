@@ -38,7 +38,8 @@
 
 #define FTP_PORT             21
 #if defined(PICO_RP2040)
-#define XFER_CHUNK           2048
+// static ram is short on the RP2040: 3 sessions x 1k instead of x 2k
+#define XFER_CHUNK           1024
 #else
 #define XFER_CHUNK           4096
 #endif
